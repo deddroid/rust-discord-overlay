@@ -153,14 +153,16 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
     let icon    = vcfg.icon_size as f64;
     let padding = 8.0;
     let ring_w  = (icon * 0.08).clamp(2.5, 6.0);
-    let mut y   = padding;
+    let name_w  = if vcfg.show_names { 180.0 } else { 0.0 };
+
+    // Horizontal: users side by side; Vertical: users stacked
+    let mut cursor = padding; // x for horizontal, y for vertical
 
     for user in &users {
         let elapsed = user.last_spoke
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or(f64::MAX);
 
-        // Skip silent users if only_speaking is enabled
         if vcfg.only_speaking && !user.speaking && elapsed > vcfg.fade_time {
             continue;
         }
@@ -171,20 +173,35 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
             ((vcfg.fade_time - elapsed) / vcfg.fade_time).clamp(0.0, 1.0)
         };
 
-        let row_h = icon + padding;
-        // Width: icon + gap + name text area
-        let name_w = if vcfg.show_names { 180.0 } else { 0.0 };
-        let row_w  = icon + padding * 2.0 + name_w + ring_w * 2.0;
+        let (cx, cy, row_w, row_h, pill_x, pill_y): (f64,f64,f64,f64,f64,f64);
+
+        if vcfg.horizontal {
+            // Horizontal: fixed-width column per user (avatar only, names below)
+            let col_w = icon + ring_w * 2.0 + padding * 2.0;
+            let col_h = icon + ring_w * 2.0 + padding
+                + if vcfg.show_names { 20.0 } else { 0.0 };
+            row_w = col_w; row_h = col_h;
+            pill_x = cursor; pill_y = 0.0;
+            cx = cursor + col_w / 2.0;
+            cy = padding + ring_w + icon / 2.0;
+            cursor += col_w + vcfg.icon_spacing as f64;
+        } else {
+            // Vertical: full-width row per user
+            row_h = icon + padding;
+            row_w = icon + padding * 2.0 + name_w + ring_w * 2.0;
+            pill_x = 0.0; pill_y = cursor;
+            cx = padding + ring_w + icon / 2.0;
+            cy = cursor + row_h / 2.0;
+            cursor += row_h + vcfg.icon_spacing as f64;
+        }
+
+        let av_r = icon / 2.0;
 
         // Background pill
         let [br, bg, bb, ba] = vcfg.bg_color;
-        rounded_rect(cr, 0.0, y, row_w, row_h, icon / 2.0);
+        rounded_rect(cr, pill_x, pill_y, row_w, row_h, icon / 2.0);
         cr.set_source_rgba(br, bg, bb, ba * alpha);
         cr.fill().ok();
-
-        let cx = padding + ring_w + icon / 2.0;
-        let cy = y + row_h / 2.0;
-        let av_r = icon / 2.0;
 
         // Talking ring
         cr.arc(cx, cy, av_r + ring_w * 0.6, 0.0, std::f64::consts::TAU);
@@ -243,26 +260,29 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
 
         // Username
         if vcfg.show_names {
-            let tx = cx + av_r + padding + ring_w;
             let name: String = user.username.chars()
                 .take(vcfg.nick_length as usize)
                 .collect();
-            // Shadow
-            cr.move_to(tx + 1.0, cy + 5.5);
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.6 * alpha);
-            cr.show_text(&name).ok();
-            // Text color from config
-            let [fr, fg, fb, fa] = if user.speaking {
-                vcfg.talking_color
+            let [fr, fg, fb, fa] = if user.speaking { vcfg.talking_color } else { vcfg.idle_color };
+            if vcfg.horizontal {
+                // Name below avatar, centered
+                let name_y = cy + av_r + ring_w + 14.0;
+                cr.move_to(pill_x + row_w / 2.0 - 20.0, name_y);
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.6 * alpha);
+                cr.show_text(&name).ok();
+                cr.move_to(pill_x + row_w / 2.0 - 21.0, name_y - 1.0);
+                cr.set_source_rgba(fr, fg, fb, fa * alpha);
+                cr.show_text(&name).ok();
             } else {
-                vcfg.idle_color
-            };
-            cr.move_to(tx, cy + 5.0);
-            cr.set_source_rgba(fr, fg, fb, fa * alpha);
-            cr.show_text(&name).ok();
+                let tx = cx + av_r + padding + ring_w;
+                cr.move_to(tx + 1.0, cy + 5.5);
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.6 * alpha);
+                cr.show_text(&name).ok();
+                cr.move_to(tx, cy + 5.0);
+                cr.set_source_rgba(fr, fg, fb, fa * alpha);
+                cr.show_text(&name).ok();
+            }
         }
-
-        y += row_h + padding * 0.4;
     }
 }
 

@@ -38,12 +38,20 @@ async fn main() {
         None => {}
     }
 
-    // Kill any existing instance and wait for it to exit
-    if ipc::send_command(Command::Close).await.is_ok() {
-        info!("Waiting for previous instance to exit...");
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Kill existing instance
+    kill_existing_instance().await;
+
+    info!("Starting Rust Discord Overlay (pid={})", std::process::id());
+
+    // Become process group leader so children can be killed together
+    unsafe {
+        libc::setpgid(0, 0);
+        // Auto-reap children so they don't become zombies
+        // (settings subprocesses would otherwise stay as <defunct>)
+        libc::signal(libc::SIGCHLD, libc::SIG_IGN);
     }
-    info!("Starting Rust Discord Overlay");
+
+    ipc::write_pid();
 
     let cfg = config::Config::load();
     let audio_assist = cfg.audio_assist;
@@ -53,6 +61,25 @@ async fn main() {
         error!("Fatal: {e}");
         std::process::exit(1);
     }
+}
+
+async fn kill_existing_instance() {
+    // Try IPC first
+    let _ = ipc::send_command(Command::Close).await;
+    // Kill entire process group of old instance
+    if let Some(pid) = ipc::read_pid() {
+        if pid != std::process::id() {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+            tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+        }
+    }
+    ipc::remove_pid();
+    // Also remove stale settings lock
+    let _ = std::fs::remove_file(
+        dirs::runtime_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("rust-discord-overlay-settings.lock")
+    );
 }
 
 async fn run(state: state::SharedState, audio_assist: bool) -> Result<()> {
@@ -66,9 +93,9 @@ async fn run(state: state::SharedState, audio_assist: bool) -> Result<()> {
         tokio::spawn(audio::run(state.clone(), tx.clone()));
     }
 
-    // Spawn system tray icon (background thread, non-blocking)
     tray::spawn();
-
     overlay::run(state, rx).await;
+
+    ipc::remove_pid();
     Ok(())
 }

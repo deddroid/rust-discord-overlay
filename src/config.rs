@@ -160,7 +160,7 @@ pub struct Config {
 impl Config {
     pub fn config_dir() -> PathBuf {
         dirs::config_dir().unwrap_or_else(|| PathBuf::from("~/.config"))
-            .join("rusto-discord-overlay")
+            .join("rust-discord-overlay")
     }
     pub fn config_path() -> PathBuf { Self::config_dir().join("config.toml") }
     pub fn load() -> Self {

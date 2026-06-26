@@ -1,90 +1,73 @@
-//! System tray via D-Bus StatusNotifierItem (KDE, GNOME+AppIndicator, XFCE).
-//! Uses zbus for D-Bus communication — zero external tray dependencies.
-//! Falls back gracefully if D-Bus is unavailable.
+use tracing::info;
 
-use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
+#[derive(Debug)]
+struct RdoTray;
 
-pub fn spawn() {
-    info!("Starting system tray icon");
-    std::thread::spawn(|| {
-        // Try to register via ksni
-        match run_tray() {
-            Ok(_) => {}
-            Err(e) => warn!("Tray icon unavailable: {e}"),
-        }
+impl ksni::Tray for RdoTray {
+    fn icon_name(&self) -> String { "rust-discord-overlay".into() }
+    fn title(&self) -> String { "Rust Discord Overlay".into() }
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        vec![
+            ksni::MenuItem::Standard(ksni::menu::StandardItem {
+                label: "Settings…".into(),
+                activate: Box::new(|_: &mut Self| {
+                    let exe = std::env::current_exe()
+                        .unwrap_or_else(|_| "rust-discord-overlay".into());
+                    let _ = std::process::Command::new(exe)
+                        .arg("configure")
+                        .spawn();
+                }),
+                ..Default::default()
+            }),
+            ksni::MenuItem::Standard(ksni::menu::StandardItem {
+                label: "Hide Overlay".into(),
+                activate: Box::new(|_: &mut Self| send_ipc(crate::cli::Command::Hide)),
+                ..Default::default()
+            }),
+            ksni::MenuItem::Standard(ksni::menu::StandardItem {
+                label: "Show Overlay".into(),
+                activate: Box::new(|_: &mut Self| send_ipc(crate::cli::Command::Show)),
+                ..Default::default()
+            }),
+            ksni::MenuItem::Separator,
+            ksni::MenuItem::Standard(ksni::menu::StandardItem {
+                label: "Quit".into(),
+                icon_name: "application-exit".into(),
+                activate: Box::new(|_: &mut Self| {
+                    // Kill the entire process group (daemon + pactl + any subprocesses)
+                    // read_pid() gives us the daemon PID which is the group leader
+                    if let Some(pid) = crate::ipc::read_pid() {
+                        crate::ipc::remove_pid();
+                        // Negative PID = kill entire process group
+                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                    }
+                    // Also clean up settings lock if present
+                    let _ = std::fs::remove_file(
+                        dirs::runtime_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                            .join("rust-discord-overlay-settings.lock")
+                    );
+                    std::process::exit(0);
+                }),
+                ..Default::default()
+            }),
+        ]
+    }
+}
+
+fn send_ipc(cmd: crate::cli::Command) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all().build().unwrap();
+        let _ = rt.block_on(crate::ipc::send_command(cmd));
     });
 }
 
-fn run_tray() -> Result<(), Box<dyn std::error::Error>> {
-    let visible = Arc::new(Mutex::new(true));
-
-    struct RdoTray {
-        visible: Arc<Mutex<bool>>,
-    }
-
-    impl ksni::Tray for RdoTray {
-        fn icon_name(&self) -> String {
-        // Uses icon installed to /usr/share/icons or ~/.local/share/icons
-        // Falls back to audio-headset if not installed
-        "rust-discord-overlay".into()
-    }
-        fn title(&self) -> String { "Rust Discord Overlay".into() }
-        fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
-            let vis = *self.visible.lock().unwrap();
-            vec![
-                ksni::MenuItem::Standard(ksni::menu::StandardItem {
-                    label: "Settings…".into(),
-                    activate: Box::new(|_: &mut Self| {
-                        // Launch settings as a separate process — GTK can only run
-                        // on the main thread, and the overlay already owns it.
-                        let exe = std::env::current_exe()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("rust-discord-overlay"));
-                        let _ = std::process::Command::new(exe)
-                            .arg("configure")
-                            .spawn();
-                    }),
-                    ..Default::default()
-                }),
-                ksni::MenuItem::Standard(ksni::menu::StandardItem {
-                    label: if vis { "Hide Overlay" } else { "Show Overlay" }.into(),
-                    activate: Box::new(move |this: &mut Self| {
-                        let mut v = this.visible.lock().unwrap();
-                        *v = !*v;
-                        let show = *v;
-                        drop(v);
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Builder::new_current_thread()
-                                .enable_all().build().unwrap();
-                            let cmd = if show {
-                                crate::cli::Command::Show
-                            } else {
-                                crate::cli::Command::Hide
-                            };
-                            let _ = rt.block_on(crate::ipc::send_command(cmd));
-                        });
-                    }),
-                    ..Default::default()
-                }),
-                ksni::MenuItem::Separator,
-                ksni::MenuItem::Standard(ksni::menu::StandardItem {
-                    label: "Quit".into(),
-                    activate: Box::new(|_: &mut Self| {
-                        std::process::exit(0);
-                    }),
-                    ..Default::default()
-                }),
-            ]
-        }
-    }
-
-    let tray = RdoTray { visible };
-    let service = ksni::TrayService::new(tray);
-    service.spawn();
-    info!("Tray icon registered (StatusNotifierItem)");
-
-    // Keep thread alive
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
+pub fn spawn() {
+    info!("Starting system tray");
+    std::thread::spawn(|| {
+        let service = ksni::TrayService::new(RdoTray);
+        service.spawn();
+        loop { std::thread::sleep(std::time::Duration::from_secs(60)); }
+    });
 }

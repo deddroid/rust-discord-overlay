@@ -1,8 +1,3 @@
-//! IPC via Unix socket at $XDG_RUNTIME_DIR/rust-discord-overlay.sock
-//!
-//! The daemon listens; other invocations with a sub-command connect,
-//! send one JSON line, then exit.
-
 use crate::{cli::Command, discord::RpcEvent, state::SharedState};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -16,6 +11,28 @@ fn socket_path() -> PathBuf {
     dirs::runtime_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("rust-discord-overlay.sock")
+}
+
+pub fn pid_path() -> PathBuf {
+    dirs::runtime_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("rust-discord-overlay.pid")
+}
+
+pub fn write_pid() {
+    let _ = std::fs::write(pid_path(), std::process::id().to_string());
+}
+
+pub fn read_pid() -> Option<u32> {
+    std::fs::read_to_string(pid_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+pub fn remove_pid() {
+    let _ = std::fs::remove_file(pid_path());
 }
 
 pub async fn send_command(cmd: Command) -> Result<()> {
@@ -33,7 +50,7 @@ pub async fn serve(state: SharedState, tx: crate::discord::EventTx) {
         Ok(l) => l,
         Err(e) => { error!("Cannot bind IPC socket: {e}"); return; }
     };
-    info!("Rusto Discord Overlay — IPC socket at {path:?}");
+    info!("IPC socket at {path:?}");
 
     loop {
         match listener.accept().await {
@@ -54,9 +71,9 @@ async fn handle_client(stream: UnixStream, state: SharedState, tx: crate::discor
         };
         match &cmd {
             Command::Close => {
-                info!("Close command received — shutting down");
-                // Give a moment for the IPC response to be sent
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                info!("Close received — exiting");
+                remove_pid();
+                // Exit the entire process cleanly
                 std::process::exit(0);
             }
             Command::Hide => {
@@ -68,7 +85,6 @@ async fn handle_client(stream: UnixStream, state: SharedState, tx: crate::discor
                 let _ = tx.send(RpcEvent::Control(cmd));
             }
             Command::Reload => {
-                // Ricarica config dal file e aggiorna lo stato condiviso
                 let new_cfg = crate::config::Config::load();
                 state.lock().unwrap().config = new_cfg;
                 let _ = tx.send(RpcEvent::Control(cmd));
