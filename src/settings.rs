@@ -15,7 +15,11 @@ pub fn open_settings() {
     let win = build_window(ml.clone());
     win.present();
     let ml2 = ml.clone();
-    win.connect_destroy(move |_| ml2.quit());
+    win.connect_destroy(move |_| {
+        ml2.quit();
+        // If opened as subprocess (from tray), exit completely when window closes
+        std::process::exit(0);
+    });
     ml.run();
 }
 

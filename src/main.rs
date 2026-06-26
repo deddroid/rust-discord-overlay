@@ -38,7 +38,11 @@ async fn main() {
         None => {}
     }
 
-    let _ = ipc::send_command(Command::Close).await;
+    // Kill any existing instance and wait for it to exit
+    if ipc::send_command(Command::Close).await.is_ok() {
+        info!("Waiting for previous instance to exit...");
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
     info!("Starting Rust Discord Overlay");
 
     let cfg = config::Config::load();

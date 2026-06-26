@@ -54,7 +54,9 @@ async fn handle_client(stream: UnixStream, state: SharedState, tx: crate::discor
         };
         match &cmd {
             Command::Close => {
-                info!("Close command received — exiting");
+                info!("Close command received — shutting down");
+                // Give a moment for the IPC response to be sent
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 std::process::exit(0);
             }
             Command::Hide => {
