@@ -129,6 +129,7 @@ rust-discord-overlay (daemon)
 ## Credits
 
 - [trigg/Discover](https://github.com/trigg/Discover) — original Python overlay, protocol research
+- [Claude](https://claude.ai) (Anthropic) — wrote virtually all the Rust code in this project
 - [gtk-rs](https://gtk-rs.org/) — GTK4 Rust bindings
 - [ksni](https://github.com/iovxw/ksni) — StatusNotifierItem tray
 - [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite) — WebSocket client
