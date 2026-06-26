@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Rust Discord Overlay
+Comment=Discord voice overlay for Linux
+Exec=rust-discord-overlay
+Icon=rust-discord-overlay
+Type=Application
+Categories=Network;Chat;
+Keywords=discord;overlay;voice;
+StartupNotify=false
