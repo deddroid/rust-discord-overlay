@@ -14,7 +14,7 @@ optdepends=(
     'pipewire-pulse: for audio sync feature (PipeWire)'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/deddroid/$pkgname/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('d5558cd419c8d46bdc958064cb97f963d1ea793866414c025906ec15033512ed')
+sha256sums=('d48995ffae9826ded81f4b25b3ac0533e6175577e73848af3380a657d8938e6c')
 
 prepare() {
     cd "$pkgname-$pkgver"
