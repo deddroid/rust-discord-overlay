@@ -76,7 +76,7 @@ struct ColorWidgets {
 }
 
 struct AdvancedWidgets {
-    audio: Switch, font_btn: FontDialogButton, tpad: SpinButton, tadj: SpinButton, bw: SpinButton,
+    audio: Switch, test_users: Switch, font_btn: FontDialogButton, tpad: SpinButton, tadj: SpinButton, bw: SpinButton,
 }
 
 struct TextWidgets {
@@ -131,6 +131,7 @@ fn save_all(vw: &VoiceWidgets, cw: &ColorWidgets, aw: &AdvancedWidgets, tw: &Tex
 
     // Advanced
     c.audio_assist = aw.audio.is_active();
+    c.show_test_users = aw.test_users.is_active();
     if let Some(fd) = aw.font_btn.font_desc() { c.voice.font = fd.to_string(); }
     c.voice.text_padding = aw.tpad.value() as i32;
     c.voice.text_baseline_adj = aw.tadj.value() as i32;
@@ -334,6 +335,9 @@ fn build_advanced_tab() -> (ScrolledWindow, AdvancedWidgets) {
 
     section(&g, "AUDIO", r); r += 1;
     let audio = tog(&g, "Sync with PulseAudio/PipeWire", cfg.audio_assist, r); r += 1;
+
+    section(&g, "DEBUG", r); r += 1;
+    let test_users = tog(&g, "Show test avatars when not in a call", cfg.show_test_users, r); r += 1;
     let note = Label::new(Some("Requires overlay restart"));
     note.add_css_class("dim-label"); note.set_halign(Align::Start);
     g.attach(&note, 0, r, 4, 1); r += 1;
@@ -350,7 +354,7 @@ fn build_advanced_tab() -> (ScrolledWindow, AdvancedWidgets) {
     section(&g, "BORDER", r); r += 1;
     let bw = num(&g, "Width (px)", cfg.voice.border_width as f64, 0.0, 20.0, r);
 
-    let w = AdvancedWidgets { audio, font_btn, tpad, tadj, bw };
+    let w = AdvancedWidgets { audio, test_users, font_btn, tpad, tadj, bw };
     (wrap(g), w)
 }
 

@@ -292,21 +292,28 @@ async fn handle_event(
 
         // Utente entra / aggiorna stato
         ("DISPATCH", "VOICE_STATE_CREATE") | ("DISPATCH", "VOICE_STATE_UPDATE") => {
-            let user      = parse_voice_user(data);
-            let uid       = user.user_id.clone();
-            let avatar    = user.avatar_url.clone();
+            let mut user = parse_voice_user(data);
+            let uid = user.user_id.clone();
             let icon_size = state.lock().unwrap().config.voice.icon_size;
 
-            let needs_avatar = state.lock().unwrap()
-                .voice_users.get(&uid)
-                .map(|u| u.avatar_cache.is_none())
-                .unwrap_or(true);
+            // Preserve avatar cache — VOICE_STATE_UPDATE fires on every mute/unmute
+            // If we drop the cache, the avatar disappears until re-downloaded
+            {
+                let mut s = state.lock().unwrap();
+                if let Some(existing) = s.voice_users.get(&uid) {
+                    user.avatar_cache = existing.avatar_cache.clone();
+                    user.avatar_size  = existing.avatar_size;
+                }
+                let needs_fetch = user.avatar_cache.is_none();
+                let url = user.avatar_url.clone();
+                s.voice_users.insert(uid.clone(), user.clone());
+                drop(s);
 
-            state.lock().unwrap().voice_users.insert(uid.clone(), user.clone());
-
-            if needs_avatar {
-                if let Some(url) = avatar {
-                    crate::avatar::fetch_avatar(state.clone(), tx.clone(), uid, url, icon_size);
+                if needs_fetch {
+                    if let Some(url) = url {
+                        crate::avatar::fetch_avatar(
+                            state.clone(), tx.clone(), uid, url, icon_size);
+                    }
                 }
             }
             let _ = tx.send(RpcEvent::VoiceStateUpdate(user));

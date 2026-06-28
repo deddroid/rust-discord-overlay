@@ -1,4 +1,4 @@
-use crate::{config::{Anchor, Config}, discord::RpcEvent, state::{SharedState, VoiceUser}};
+use crate::{config::{Anchor, AvatarOrder, Config}, discord::RpcEvent, state::{SharedState, VoiceUser}};
 use gtk4::{cairo, glib, prelude::*, Application, ApplicationWindow, DrawingArea};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use std::time::Duration;
@@ -135,6 +135,8 @@ fn build_voice_window(app: &Application, cfg: &Config, state: SharedState) -> Ap
     win
 }
 
+// ── Voice rendering ───────────────────────────────────────────────────────────
+
 fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
     cr.set_operator(cairo::Operator::Clear);
     cr.paint().ok();
@@ -142,21 +144,42 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
 
     let vcfg = &cfg.voice;
 
-    let users: Vec<VoiceUser> = {
+    let mut users: Vec<VoiceUser> = {
         let s = state.lock().unwrap();
-        if s.voice_users.is_empty() { fake_users() }
-        else { s.voice_users.values().cloned().collect() }
+        if s.voice_users.is_empty() {
+            if s.config.show_test_users { fake_users() } else { vec![] }
+        } else {
+            s.voice_users.values().cloned().collect()
+        }
     };
 
     if users.is_empty() { return; }
 
-    let icon    = vcfg.icon_size as f64;
-    let padding = 8.0;
-    let ring_w  = (icon * 0.08).clamp(2.5, 6.0);
-    let name_w  = if vcfg.show_names { 180.0 } else { 0.0 };
+    // Sort by user preference
+    match vcfg.order {
+        AvatarOrder::Alphabetical => {
+            users.sort_by(|a, b| a.username.to_lowercase().cmp(&b.username.to_lowercase()));
+        }
+        AvatarOrder::Id => {
+            users.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        }
+        AvatarOrder::LastSpoken => {
+            users.sort_by(|a, b| {
+                let ta = a.last_spoke.map(|t| t.elapsed().as_millis()).unwrap_or(u128::MAX);
+                let tb = b.last_spoke.map(|t| t.elapsed().as_millis()).unwrap_or(u128::MAX);
+                ta.cmp(&tb)
+            });
+        }
+    }
 
-    // Horizontal: users side by side; Vertical: users stacked
-    let mut cursor = padding; // x for horizontal, y for vertical
+    let icon    = vcfg.icon_size as f64;
+    let ring_w  = (vcfg.border_width as f64).clamp(1.0, 12.0);
+    let name_w  = if vcfg.show_names { 180.0 } else { 0.0 };
+    let mut cursor = if vcfg.horizontal {
+        vcfg.horz_edge_padding as f64
+    } else {
+        vcfg.vert_edge_padding as f64
+    };
 
     for user in &users {
         let elapsed = user.last_spoke
@@ -167,116 +190,122 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
             continue;
         }
 
-        let alpha: f64 = if user.speaking || !vcfg.only_speaking {
+        let fade_alpha: f64 = if user.speaking || !vcfg.only_speaking {
             1.0
         } else {
             ((vcfg.fade_time - elapsed) / vcfg.fade_time).clamp(0.0, 1.0)
         };
+        let alpha = fade_alpha * vcfg.icon_transparency;
 
-        let (cx, cy, row_w, row_h, pill_x, pill_y): (f64,f64,f64,f64,f64,f64);
+        // Pick colors based on speaking/mute state
+        let (pill_bg, ring_col, txt_col) = if user.speaking {
+            (vcfg.talking_bg_color, vcfg.talking_border_color, vcfg.talking_color)
+        } else if user.muted || user.deafened {
+            (vcfg.mute_bg_color, vcfg.idle_border_color, vcfg.mute_color)
+        } else {
+            (vcfg.idle_bg_color, vcfg.idle_border_color, vcfg.idle_color)
+        };
+
+        let av_r    = icon / 2.0;
+        let pill_h  = icon + 4.0;
+
+        let (cx, cy, pill_w, pill_x, pill_y): (f64,f64,f64,f64,f64);
+
+        let hpad = vcfg.horz_edge_padding as f64;
+        let vpad = vcfg.vert_edge_padding as f64;
 
         if vcfg.horizontal {
-            // Horizontal: fixed-width column per user (avatar only, names below)
-            let col_w = icon + ring_w * 2.0 + padding * 2.0;
-            let col_h = icon + ring_w * 2.0 + padding
-                + if vcfg.show_names { 20.0 } else { 0.0 };
-            row_w = col_w; row_h = col_h;
-            pill_x = cursor; pill_y = 0.0;
+            let col_w = icon + ring_w * 2.0;  // no extra internal padding
+            pill_w = col_w;
+            pill_x = cursor; pill_y = vpad;
             cx = cursor + col_w / 2.0;
-            cy = padding + ring_w + icon / 2.0;
+            cy = vpad + ring_w + av_r;
             cursor += col_w + vcfg.icon_spacing as f64;
         } else {
-            // Vertical: full-width row per user
-            row_h = icon + padding;
-            row_w = icon + padding * 2.0 + name_w + ring_w * 2.0;
-            pill_x = 0.0; pill_y = cursor;
-            cx = padding + ring_w + icon / 2.0;
-            cy = cursor + row_h / 2.0;
-            cursor += row_h + vcfg.icon_spacing as f64;
+            pill_w = icon + 4.0 + name_w + ring_w * 2.0;
+            pill_x = hpad; pill_y = cursor;
+            cx = hpad + 2.0 + ring_w + av_r;
+            cy = cursor + pill_h / 2.0;
+            cursor += pill_h + vcfg.icon_spacing as f64;
         }
 
-        let av_r = icon / 2.0;
-
         // Background pill
-        let [br, bg, bb, ba] = vcfg.bg_color;
-        rounded_rect(cr, pill_x, pill_y, row_w, row_h, icon / 2.0);
+        let [br, bg, bb, ba] = pill_bg;
+        let pill_r = (pill_h / 2.0).min(pill_w / 2.0);
+        rounded_rect(cr, pill_x, pill_y, pill_w, pill_h, pill_r);
         cr.set_source_rgba(br, bg, bb, ba * alpha);
         cr.fill().ok();
 
-        // Talking ring
-        cr.arc(cx, cy, av_r + ring_w * 0.6, 0.0, std::f64::consts::TAU);
+        // Ring around avatar
+        let [rr, rg, rb, ra] = ring_col;
+        cr.arc(cx, cy, av_r + ring_w * 0.5 + 1.0, 0.0, std::f64::consts::TAU);
         if user.speaking {
-            let [r,g,b,a] = vcfg.talking_border_color;
-            cr.set_source_rgba(r, g, b, a * alpha);
+            cr.set_source_rgba(rr, rg, rb, ra * alpha);
             cr.set_line_width(ring_w);
         } else {
-            let [r,g,b,a] = vcfg.idle_border_color;
-            cr.set_source_rgba(r, g, b, a * alpha * 0.5);
-            cr.set_line_width(ring_w * 0.4);
+            cr.set_source_rgba(rr, rg, rb, ra * alpha * 0.4);
+            cr.set_line_width((ring_w * 0.4).max(1.0));
         }
         cr.stroke().ok();
 
         // Avatar
         if vcfg.show_avatar {
-            cr.arc(cx, cy, av_r, 0.0, std::f64::consts::TAU);
             if let Some(px) = &user.avatar_cache {
-                if vcfg.square_avatar {
-                    draw_avatar_square(cr, px, user.avatar_size, cx, cy, av_r, alpha);
-                } else {
-                    draw_avatar_circle(cr, px, user.avatar_size, cx, cy, av_r, alpha);
-                }
+                blit_avatar(cr, px, user.avatar_size.0, user.avatar_size.1,
+                            cx, cy, av_r, alpha, vcfg.square_avatar);
             } else {
-                // Colored placeholder with initial
                 let hue = user.user_id.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32));
                 let (pr, pg, pb) = hue_to_rgb(hue as f64 / 255.0);
-                cr.set_source_rgba(pr * 0.7, pg * 0.7, pb * 0.7, alpha);
+                let [abr, abg, abb, aba] = vcfg.avatar_bg_color;
+                cr.arc(cx, cy, av_r, 0.0, std::f64::consts::TAU);
+                if aba > 0.01 {
+                    cr.set_source_rgba(abr, abg, abb, aba * alpha);
+                } else {
+                    cr.set_source_rgba(pr * 0.6, pg * 0.6, pb * 0.6, alpha);
+                }
                 cr.fill().ok();
-                cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.9);
                 let letter = user.username.chars().next()
                     .unwrap_or('?').to_uppercase().next().unwrap_or('?').to_string();
-                cr.move_to(cx - icon * 0.15, cy + icon * 0.18);
+                cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.9);
+                cr.move_to(cx - icon * 0.14, cy + icon * 0.17);
                 cr.show_text(&letter).ok();
             }
         }
 
-        // Status badges — positioned so they don't overlap
-        // Muted mic: bottom-right of avatar
-        if user.muted && !user.deafened {
-            let bx = cx + av_r * 0.65;
-            let by = cy + av_r * 0.65;
-            draw_badge_mic_muted(cr, bx, by, (icon * 0.18).clamp(6.0, 12.0), alpha);
+        // Dark overlay on avatar when muted or deafened
+        if vcfg.show_avatar && (user.muted || user.deafened) {
+            cr.arc(cx, cy, av_r, 0.0, std::f64::consts::TAU);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.45 * alpha);
+            cr.fill().ok();
         }
-        // Deafened: top-right (headphone slash) + bottom-right implied mute
+
+        // Status badges using mute_color from config
+        let [mr, mg, mb, _] = vcfg.mute_color;
         if user.deafened {
-            // Deafen badge top-right
-            let bx = cx + av_r * 0.65;
-            let by = cy - av_r * 0.65;
-            draw_badge_deafened(cr, bx, by, (icon * 0.18).clamp(6.0, 12.0), alpha);
-            // Also show mute badge bottom-right
-            let bx2 = cx + av_r * 0.65;
-            let by2 = cy + av_r * 0.65;
-            draw_badge_mic_muted(cr, bx2, by2, (icon * 0.18).clamp(6.0, 12.0), alpha);
+            draw_badge(cr, cx + av_r * 0.65, cy - av_r * 0.65,
+                       (icon * 0.16).clamp(5.0, 11.0), mr, mg, mb, alpha, false);
+        }
+        if user.muted {
+            draw_badge(cr, cx + av_r * 0.65, cy + av_r * 0.65,
+                       (icon * 0.16).clamp(5.0, 11.0), mr, mg, mb, alpha, true);
         }
 
         // Username
         if vcfg.show_names {
-            let name: String = user.username.chars()
-                .take(vcfg.nick_length as usize)
-                .collect();
-            let [fr, fg, fb, fa] = if user.speaking { vcfg.talking_color } else { vcfg.idle_color };
+            let name: String = user.username.chars().take(vcfg.nick_length as usize).collect();
+            let [fr, fg, fb, fa] = txt_col;
             if vcfg.horizontal {
-                // Name below avatar, centered
-                let name_y = cy + av_r + ring_w + 14.0;
-                cr.move_to(pill_x + row_w / 2.0 - 20.0, name_y);
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.6 * alpha);
+                let ny = cy + av_r + ring_w + 12.0;
+                cr.move_to(pill_x + pill_w / 2.0 - 18.0, ny);
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.5 * alpha);
                 cr.show_text(&name).ok();
-                cr.move_to(pill_x + row_w / 2.0 - 21.0, name_y - 1.0);
+                cr.move_to(pill_x + pill_w / 2.0 - 19.0, ny - 1.0);
                 cr.set_source_rgba(fr, fg, fb, fa * alpha);
                 cr.show_text(&name).ok();
             } else {
-                let tx = cx + av_r + padding + ring_w;
+                let tx = cx + av_r + 4.0 + ring_w;
                 cr.move_to(tx + 1.0, cy + 5.5);
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.6 * alpha);
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.5 * alpha);
                 cr.show_text(&name).ok();
                 cr.move_to(tx, cy + 5.0);
                 cr.set_source_rgba(fr, fg, fb, fa * alpha);
@@ -286,35 +315,21 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
     }
 }
 
-fn draw_badge_mic_muted(cr: &cairo::Context, cx: f64, cy: f64, r: f64, alpha: f64) {
-    // Red circle
-    cr.set_source_rgba(0.9, 0.15, 0.15, alpha);
-    cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
+fn draw_badge(cr: &cairo::Context, bx: f64, by: f64, r: f64,
+              col_r: f64, col_g: f64, col_b: f64, alpha: f64, is_mute: bool) {
+    cr.set_source_rgba(col_r, col_g, col_b, alpha);
+    cr.arc(bx, by, r, 0.0, std::f64::consts::TAU);
     cr.fill().ok();
-    // White diagonal line (mic slash)
     cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-    cr.set_line_width(r * 0.35);
-    cr.move_to(cx - r * 0.55, cy - r * 0.55);
-    cr.line_to(cx + r * 0.55, cy + r * 0.55);
-    cr.stroke().ok();
-}
-
-fn draw_badge_deafened(cr: &cairo::Context, cx: f64, cy: f64, r: f64, alpha: f64) {
-    // Dark circle
-    cr.set_source_rgba(0.2, 0.2, 0.2, alpha * 0.85);
-    cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
-    cr.fill().ok();
-    // White headphone arc
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-    cr.set_line_width(r * 0.28);
-    cr.arc(cx, cy + r * 0.1, r * 0.55, std::f64::consts::PI, 0.0);
-    cr.stroke().ok();
-    // Red diagonal slash
-    cr.set_source_rgba(0.9, 0.15, 0.15, alpha);
-    cr.set_line_width(r * 0.3);
-    cr.move_to(cx - r * 0.6, cy - r * 0.6);
-    cr.line_to(cx + r * 0.6, cy + r * 0.6);
-    cr.stroke().ok();
+    cr.set_line_width(r * 0.32);
+    let d = r * 0.5;
+    if is_mute {
+        cr.move_to(bx - d, by - d); cr.line_to(bx + d, by + d); cr.stroke().ok();
+        cr.move_to(bx + d, by - d); cr.line_to(bx - d, by + d); cr.stroke().ok();
+    } else {
+        cr.arc(bx, by + r * 0.1, r * 0.5, std::f64::consts::PI, 0.0); cr.stroke().ok();
+        cr.move_to(bx - d, by - d); cr.line_to(bx + d, by + d); cr.stroke().ok();
+    }
 }
 
 fn hue_to_rgb(h: f64) -> (f64, f64, f64) {
@@ -322,12 +337,9 @@ fn hue_to_rgb(h: f64) -> (f64, f64, f64) {
     let i = h as u32;
     let f = h - i as f64;
     match i % 6 {
-        0 => (1.0, f, 0.0),
-        1 => (1.0-f, 1.0, 0.0),
-        2 => (0.0, 1.0, f),
-        3 => (0.0, 1.0-f, 1.0),
-        4 => (f, 0.0, 1.0),
-        _ => (1.0, 0.0, 1.0-f),
+        0 => (1.0, f, 0.0), 1 => (1.0-f, 1.0, 0.0),
+        2 => (0.0, 1.0, f), 3 => (0.0, 1.0-f, 1.0),
+        4 => (f, 0.0, 1.0), _ => (1.0, 0.0, 1.0-f),
     }
 }
 
@@ -341,20 +353,9 @@ fn rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.close_path();
 }
 
-fn draw_avatar_circle(cr: &cairo::Context, pixels: &[u8], (pw, ph): (u32, u32),
-                      cx: f64, cy: f64, r: f64, alpha: f64) {
-    if pw == 0 || ph == 0 { return; }
-    blit_avatar(cr, pixels, pw, ph, cx, cy, r, alpha, false);
-}
-
-fn draw_avatar_square(cr: &cairo::Context, pixels: &[u8], (pw, ph): (u32, u32),
-                      cx: f64, cy: f64, r: f64, alpha: f64) {
-    if pw == 0 || ph == 0 { return; }
-    blit_avatar(cr, pixels, pw, ph, cx, cy, r, alpha, true);
-}
-
 fn blit_avatar(cr: &cairo::Context, pixels: &[u8], pw: u32, ph: u32,
                cx: f64, cy: f64, r: f64, alpha: f64, square: bool) {
+    if pw == 0 || ph == 0 { return; }
     let stride = cairo::Format::ARgb32.stride_for_width(pw).unwrap_or(0) as usize;
     let mut argb = vec![0u8; ph as usize * stride];
     for row in 0..ph as usize {
