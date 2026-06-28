@@ -1817,6 +1817,7 @@ dependencies = [
  "image",
  "interprocess",
  "ksni",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
