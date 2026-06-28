@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm git rust cargo gtk4 gtk4-layer-shell cairo pkg-config base-devel
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package binary
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          mkdir -p dist
+          cp target/release/rust-discord-overlay dist/
+          cp assets/icon.svg dist/
+          cp assets/rust-discord-overlay.desktop dist/
+          tar czf dist/rust-discord-overlay-${VERSION}-x86_64.tar.gz \
+            -C dist rust-discord-overlay icon.svg rust-discord-overlay.desktop
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/rust-discord-overlay-*-x86_64.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build (release)",
+      "type": "shell",
+      "command": "cargo build --release",
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Run overlay",
+      "type": "shell",
+      "command": "pkill -f rust-discord-overlay; sleep 0.5; ./target/release/rust-discord-overlay",
+      "dependsOn": "Build (release)",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Release new version",
+      "type": "shell",
+      "command": "bash release.sh ${input:version}",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Push (no release)",
+      "type": "shell",
+      "command": "git add -A && git commit -m '${input:commitMsg}' && git push",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "version",
+      "type": "promptString",
+      "description": "Nuova versione (es. 0.2.0)"
+    },
+    {
+      "id": "commitMsg",
+      "type": "promptString",
+      "description": "Messaggio di commit"
+    }
+  ]
+}
