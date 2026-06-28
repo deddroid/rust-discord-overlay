@@ -4,10 +4,9 @@
     {
       "label": "Build (release)",
       "type": "shell",
-      "command": "/usr/bin/cargo build --release",
+      "command": "cargo build --release",
       "options": {
-        "shell": { "executable": "/usr/bin/bash", "args": ["-c"] },
-        "env": { "PATH": "/usr/bin:/usr/local/bin:${env:HOME}/.cargo/bin:${env:PATH}" }
+        "shell": { "executable": "/usr/bin/fish", "args": ["-c"] }
       },
       "group": { "kind": "build", "isDefault": true },
       "presentation": { "reveal": "always", "panel": "shared" }
@@ -15,29 +14,27 @@
     {
       "label": "Run overlay",
       "type": "shell",
-      "command": "/usr/bin/cargo build --release && pkill -f rust-discord-overlay; sleep 0.5; ./target/release/rust-discord-overlay &",
+      "command": "cargo build --release; and pkill -f rust-discord-overlay; sleep 0.5; ./target/release/rust-discord-overlay &",
       "options": {
-        "shell": { "executable": "/usr/bin/bash", "args": ["-c"] },
-        "env": { "PATH": "/usr/bin:/usr/local/bin:${env:HOME}/.cargo/bin:${env:PATH}" }
+        "shell": { "executable": "/usr/bin/fish", "args": ["-c"] }
       },
       "presentation": { "reveal": "always", "panel": "shared" }
     },
     {
       "label": "Release new version",
       "type": "shell",
-      "command": "/usr/bin/bash release.sh ${input:version}",
+      "command": "bash release.sh ${input:version}",
       "options": {
-        "shell": { "executable": "/usr/bin/bash", "args": ["-c"] },
-        "env": { "PATH": "/usr/bin:/usr/local/bin:${env:HOME}/.cargo/bin:${env:PATH}" }
+        "shell": { "executable": "/usr/bin/fish", "args": ["-c"] }
       },
       "presentation": { "reveal": "always", "panel": "shared" }
     },
     {
       "label": "Push (no release)",
       "type": "shell",
-      "command": "git add -A && git commit -m '${input:commitMsg}' && git push",
+      "command": "git add -A; and git commit -m '${input:commitMsg}'; and git push",
       "options": {
-        "shell": { "executable": "/usr/bin/bash", "args": ["-c"] }
+        "shell": { "executable": "/usr/bin/fish", "args": ["-c"] }
       },
       "presentation": { "reveal": "always", "panel": "shared" }
     }
