@@ -4,27 +4,30 @@
     {
       "label": "Build (release)",
       "type": "shell",
-      "command": "cargo build --release",
+      "command": "source ~/.cargo/env && cargo build --release",
+      "options": { "shell": { "executable": "bash", "args": ["-c"] } },
       "group": { "kind": "build", "isDefault": true },
       "presentation": { "reveal": "always", "panel": "shared" }
     },
     {
       "label": "Run overlay",
       "type": "shell",
-      "command": "pkill -f rust-discord-overlay; sleep 0.5; ./target/release/rust-discord-overlay",
-      "dependsOn": "Build (release)",
+      "command": "source ~/.cargo/env && cargo build --release && pkill -f rust-discord-overlay; sleep 0.5; ./target/release/rust-discord-overlay",
+      "options": { "shell": { "executable": "bash", "args": ["-c"] } },
       "presentation": { "reveal": "always", "panel": "shared" }
     },
     {
       "label": "Release new version",
       "type": "shell",
       "command": "bash release.sh ${input:version}",
+      "options": { "shell": { "executable": "bash", "args": ["-c"] } },
       "presentation": { "reveal": "always", "panel": "shared" }
     },
     {
       "label": "Push (no release)",
       "type": "shell",
       "command": "git add -A && git commit -m '${input:commitMsg}' && git push",
+      "options": { "shell": { "executable": "bash", "args": ["-c"] } },
       "presentation": { "reveal": "always", "panel": "shared" }
     }
   ],
