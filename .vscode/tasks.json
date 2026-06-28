@@ -4,9 +4,10 @@
     {
       "label": "Build (release)",
       "type": "shell",
-      "command": "cargo build --release",
+      "command": "/usr/bin/cargo build --release",
       "options": {
-        "shell": { "executable": "bash", "args": ["-l", "-c"] }
+        "shell": { "executable": "/usr/bin/bash", "args": ["-c"] },
+        "env": { "PATH": "/usr/bin:/usr/local/bin:${env:HOME}/.cargo/bin:${env:PATH}" }
       },
       "group": { "kind": "build", "isDefault": true },
       "presentation": { "reveal": "always", "panel": "shared" }
@@ -14,18 +15,20 @@
     {
       "label": "Run overlay",
       "type": "shell",
-      "command": "cargo build --release && pkill -f rust-discord-overlay; sleep 0.5; ./target/release/rust-discord-overlay &",
+      "command": "/usr/bin/cargo build --release && pkill -f rust-discord-overlay; sleep 0.5; ./target/release/rust-discord-overlay &",
       "options": {
-        "shell": { "executable": "bash", "args": ["-l", "-c"] }
+        "shell": { "executable": "/usr/bin/bash", "args": ["-c"] },
+        "env": { "PATH": "/usr/bin:/usr/local/bin:${env:HOME}/.cargo/bin:${env:PATH}" }
       },
       "presentation": { "reveal": "always", "panel": "shared" }
     },
     {
       "label": "Release new version",
       "type": "shell",
-      "command": "bash release.sh ${input:version}",
+      "command": "/usr/bin/bash release.sh ${input:version}",
       "options": {
-        "shell": { "executable": "bash", "args": ["-l", "-c"] }
+        "shell": { "executable": "/usr/bin/bash", "args": ["-c"] },
+        "env": { "PATH": "/usr/bin:/usr/local/bin:${env:HOME}/.cargo/bin:${env:PATH}" }
       },
       "presentation": { "reveal": "always", "panel": "shared" }
     },
@@ -34,7 +37,7 @@
       "type": "shell",
       "command": "git add -A && git commit -m '${input:commitMsg}' && git push",
       "options": {
-        "shell": { "executable": "bash", "args": ["-l", "-c"] }
+        "shell": { "executable": "/usr/bin/bash", "args": ["-c"] }
       },
       "presentation": { "reveal": "always", "panel": "shared" }
     }
