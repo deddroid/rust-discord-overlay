@@ -1,5 +1,8 @@
 /target/
-Cargo.lock
 *.swp
 *.swo
 .env
+pkg/
+src/rust-discord-overlay-*
+rust-discord-overlay-*.tar.gz
+rust-discord-overlay-*.pkg.tar.zst
