@@ -10,7 +10,7 @@ This is a rewrite of [trigg/Discover](https://github.com/trigg/Discover) — all
 
 ---
 
-<img width="160" height="61" alt="Schermata_20260702_213603" src="https://github.com/user-attachments/assets/409b2d01-2c2b-445f-b0ac-3f328072ef95" />![Uploading Schermata_20260702_213603.png…]()
+<img width="160" height="61" alt="Schermata_20260702_213603" src="https://github.com/user-attachments/assets/409b2d01-2c2b-445f-b0ac-3f328072ef95" />
 ---
 
 ## Features
