@@ -2,15 +2,15 @@
 
 A Discord voice/text overlay for Linux, written in Rust.
 
-This is a rewrite of [trigg/Discover](https://github.com/trigg/Discover) — all credits t<img width="160" height="61" alt="Schermata_20260702_213603" src="https://github.com/user-attachments/assets/409b2d01-2c2b-445f-b0ac-3f328072ef95" />
-o the original authors for the protocol work and design.
+This is a rewrite of [trigg/Discover](https://github.com/trigg/Discover) — all credits to the original authors for the protocol work and design.
 
 > **Note:** I'm not a real programmer, though I do work in IT. This code was written by AI and tested by me. Feel free to take it, modify it, and use it however you like.
 >
 > *"Non sono un vero programmatore, mi occupo però di informatica. Il codice è stato scritto da IA e testato, potete prenderlo e modificarlo come meglio volete."*
 
 ---
-![Uploading Schermata_20260702_213603.png…]()
+
+<img width="160" height="61" alt="Schermata_20260702_213603" src="https://github.com/user-attachments/assets/409b2d01-2c2b-445f-b0ac-3f328072ef95" />![Uploading Schermata_20260702_213603.png…]()
 ---
 
 ## Features
