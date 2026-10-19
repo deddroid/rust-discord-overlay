@@ -1,11 +1,27 @@
+//! Settings window (libadwaita).
+//! Every change is written to config.toml and pushed to the running overlay
+//! after a short debounce, so there is no Save/Apply step.
+
 use crate::config::{Anchor, AvatarOrder, Config};
-use gtk4::prelude::*;
-use gtk4::{
-    glib, Align, Box as GBox, Button, FontDialog, FontDialogButton,
-    Grid, HeaderBar, Label, Notebook, Orientation,
-    PolicyType, ScrolledWindow, SpinButton,
-    Adjustment, DropDown, StringList, Switch, Window,
-};
+use adw::prelude::*;
+use gtk4::{gdk, glib, pango, Align, ColorDialog, ColorDialogButton, FontDialog, FontDialogButton, StringList};
+use std::{cell::RefCell, rc::Rc, time::Duration};
+
+/// Delay between the last edit and the write + overlay reload
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(350);
+
+const ANCHORS: [(&str, Anchor); 4] = [
+    ("Top left", Anchor::TopLeft),
+    ("Top right", Anchor::TopRight),
+    ("Bottom left", Anchor::BottomLeft),
+    ("Bottom right", Anchor::BottomRight),
+];
+
+const ORDERS: [(&str, AvatarOrder); 3] = [
+    ("Alphabetical", AvatarOrder::Alphabetical),
+    ("User ID", AvatarOrder::Id),
+    ("Last spoken", AvatarOrder::LastSpoken),
+];
 
 fn settings_lock_path() -> std::path::PathBuf {
     dirs::runtime_dir()
@@ -20,7 +36,7 @@ fn acquire_lock() -> bool {
             // Check if alive AND not a zombie
             let proc_status = std::fs::read_to_string(format!("/proc/{}/status", pid))
                 .unwrap_or_default();
-            let alive = proc_status.contains("State:") 
+            let alive = proc_status.contains("State:")
                 && !proc_status.contains("State:\tZ")
                 && !proc_status.contains("State: Z");
             if alive { return false; }
@@ -39,439 +55,365 @@ pub fn open_settings() {
         eprintln!("Settings already open");
         return;
     }
-    gtk4::init().expect("GTK init failed");
-    let win = build_window();
-    win.present();
-    win.connect_close_request(|_| {
+    adw::init().expect("libadwaita init failed");
+    let ctx = Ctx::new(Config::load());
+    let win = build_window(&ctx);
+    win.connect_close_request(move |_| {
+        ctx.flush();
         release_lock();
         // _exit bypasses GTK cleanup handlers that can block on Wayland
         unsafe { libc::_exit(0); }
     });
+    win.present();
     let ml = glib::MainLoop::new(Some(&glib::MainContext::default()), false);
     ml.run();
     release_lock();
     unsafe { libc::_exit(0); }
 }
 
-// ── Shared state ──────────────────────────────────────────────────────────────
-// All widgets captured here; Save All reads them all at once → single write
+// ── Live config + debounced save ──────────────────────────────────────────────
 
-struct VoiceWidgets {
-    anchor: DropDown, x: SpinButton, y: SpinButton,
-    show_av: Switch, square: Switch, fancy: Switch,
-    av_size: SpinButton, opacity: SpinButton,
-    show_names: Switch, nick_len: SpinButton,
-    horiz: Switch, spacing: SpinButton, vpad: SpinButton, hpad: SpinButton,
-    order: DropDown,
-    only_sp: Switch, grace: SpinButton, hl_self: Switch,
-    sh_title: Switch, sh_conn: Switch, sh_disc: Switch, fade_t: SpinButton,
-    fade_en: Switch, fade_min: SpinButton, inact_t: SpinButton, fade_dur: SpinButton,
+#[derive(Clone)]
+struct Ctx {
+    cfg: Rc<RefCell<Config>>,
+    pending: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
-struct ColorWidgets {
-    tk_fg: gtk4::ColorDialogButton, tk_bg: gtk4::ColorDialogButton, tk_bo: gtk4::ColorDialogButton,
-    id_fg: gtk4::ColorDialogButton, id_bg: gtk4::ColorDialogButton, id_bo: gtk4::ColorDialogButton,
-    mt_fg: gtk4::ColorDialogButton, mt_bg: gtk4::ColorDialogButton,
-    bg_pill: gtk4::ColorDialogButton, av_bg: gtk4::ColorDialogButton,
-}
+impl Ctx {
+    fn new(cfg: Config) -> Self {
+        Self { cfg: Rc::new(RefCell::new(cfg)), pending: Rc::default() }
+    }
 
-struct AdvancedWidgets {
-    audio: Switch, test_users: Switch, font_btn: FontDialogButton, tpad: SpinButton, tadj: SpinButton, bw: SpinButton,
-}
+    /// Apply an edit to the in-memory config and schedule a save
+    fn edit(&self, f: impl FnOnce(&mut Config)) {
+        f(&mut self.cfg.borrow_mut());
+        if let Some(id) = self.pending.borrow_mut().take() { id.remove(); }
+        let this = self.clone();
+        let id = glib::timeout_add_local_once(SAVE_DEBOUNCE, move || {
+            this.pending.borrow_mut().take();
+            this.save_and_reload();
+        });
+        *self.pending.borrow_mut() = Some(id);
+    }
 
-struct TextWidgets {
-    enabled: Switch, popup: Switch, attach: Switch,
-    limit: SpinButton, ptime: SpinButton,
-    anch: DropDown, tx: SpinButton, ty: SpinButton,
-    ch: gtk4::Entry,
-    fg: gtk4::ColorDialogButton, bg: gtk4::ColorDialogButton,
-}
+    /// Write immediately if an edit is still waiting for its debounce
+    fn flush(&self) {
+        if let Some(id) = self.pending.borrow_mut().take() {
+            id.remove();
+            self.save_and_reload();
+        }
+    }
 
-fn save_all(vw: &VoiceWidgets, cw: &ColorWidgets, aw: &AdvancedWidgets, tw: &TextWidgets) {
-    let mut c = Config::load();
-
-    // Voice
-    c.voice.anchor = match vw.anchor.selected() { 0=>Anchor::BottomLeft, 1=>Anchor::BottomRight, 2=>Anchor::TopLeft, _=>Anchor::TopRight };
-    c.voice.x = vw.x.value() as i32; c.voice.y = vw.y.value() as i32;
-    c.voice.show_avatar = vw.show_av.is_active();
-    c.voice.square_avatar = vw.square.is_active();
-    c.voice.fancy_border = vw.fancy.is_active();
-    c.voice.icon_size = vw.av_size.value() as u32;
-    c.voice.icon_transparency = vw.opacity.value() / 100.0;
-    c.voice.show_names = vw.show_names.is_active();
-    c.voice.nick_length = vw.nick_len.value() as u32;
-    c.voice.horizontal = vw.horiz.is_active();
-    c.voice.icon_spacing = vw.spacing.value() as i32;
-    c.voice.vert_edge_padding = vw.vpad.value() as i32;
-    c.voice.horz_edge_padding = vw.hpad.value() as i32;
-    c.voice.order = match vw.order.selected() { 0=>AvatarOrder::Alphabetical, 1=>AvatarOrder::Id, _=>AvatarOrder::LastSpoken };
-    c.voice.only_speaking = vw.only_sp.is_active();
-    c.voice.only_speaking_grace = vw.grace.value() as u32;
-    c.voice.highlight_self = vw.hl_self.is_active();
-    c.voice.show_title = vw.sh_title.is_active();
-    c.voice.show_connection = vw.sh_conn.is_active();
-    c.voice.show_disconnected = vw.sh_disc.is_active();
-    c.voice.fade_time = vw.fade_t.value();
-    c.voice.fade_out_inactive = vw.fade_en.is_active();
-    c.voice.fade_out_limit = vw.fade_min.value() / 100.0;
-    c.voice.inactive_time = vw.inact_t.value() as u32;
-    c.voice.inactive_fade_time = vw.fade_dur.value() as u32;
-
-    // Colors
-    c.voice.talking_color        = rgba(&cw.tk_fg);
-    c.voice.talking_bg_color     = rgba(&cw.tk_bg);
-    c.voice.talking_border_color = rgba(&cw.tk_bo);
-    c.voice.idle_color           = rgba(&cw.id_fg);
-    c.voice.idle_bg_color        = rgba(&cw.id_bg);
-    c.voice.idle_border_color    = rgba(&cw.id_bo);
-    c.voice.mute_color           = rgba(&cw.mt_fg);
-    c.voice.mute_bg_color        = rgba(&cw.mt_bg);
-    c.voice.bg_color             = rgba(&cw.bg_pill);
-    c.voice.avatar_bg_color      = rgba(&cw.av_bg);
-
-    // Advanced
-    c.audio_assist = aw.audio.is_active();
-    c.show_test_users = aw.test_users.is_active();
-    if let Some(fd) = aw.font_btn.font_desc() { c.voice.font = fd.to_string(); }
-    c.voice.text_padding = aw.tpad.value() as i32;
-    c.voice.text_baseline_adj = aw.tadj.value() as i32;
-    c.voice.border_width = aw.bw.value() as u32;
-
-    // Text
-    c.text.enabled = tw.enabled.is_active();
-    c.text.popup_style = tw.popup.is_active();
-    c.text.show_attachments = tw.attach.is_active();
-    c.text.message_limit = tw.limit.value() as usize;
-    c.text.popup_time = tw.ptime.value() as u32;
-    c.text.anchor = match tw.anch.selected() { 0=>Anchor::BottomLeft, 1=>Anchor::BottomRight, 2=>Anchor::TopLeft, _=>Anchor::TopRight };
-    c.text.x = tw.tx.value() as i32; c.text.y = tw.ty.value() as i32;
-    c.text.channel_id = tw.ch.text().to_string();
-    c.text.fg_color = rgba(&tw.fg); c.text.bg_color = rgba(&tw.bg);
-
-    match c.save() {
-        Ok(_)  => println!("Saved → {:?}", crate::config::Config::config_path()),
-        Err(e) => eprintln!("Save error: {e}"),
+    fn save_and_reload(&self) {
+        if let Err(e) = self.cfg.borrow().save() {
+            eprintln!("Save error: {e}");
+            return;
+        }
+        // The overlay may not be running; a failed send is fine
+        let _ = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let _ = rt.block_on(crate::ipc::send_command(crate::cli::Command::Reload));
+        }).join();
     }
 }
 
-fn build_window() -> Window {
-    let win = Window::builder()
-        .title("Rust Discord Overlay — Settings")
-        .default_width(580).default_height(620)
-        .resizable(true).build();
+// ── Window ────────────────────────────────────────────────────────────────────
 
+fn build_window(ctx: &Ctx) -> adw::Window {
     gtk4::Window::set_default_icon_name("rust-discord-overlay");
 
-    let css = gtk4::CssProvider::new();
-    css.load_from_string("
-        .section-header { font-size: 11px; font-weight: bold;
-                          color: alpha(currentColor, 0.55); margin-top: 16px; }
-        .save-bar { background: alpha(currentColor, 0.05);
-                    border-top: 1px solid alpha(currentColor, 0.1); }
-    ");
-    gtk4::style_context_add_provider_for_display(
-        &gtk4::gdk::Display::default().unwrap(),
-        &css,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    let stack = adw::ViewStack::new();
+    stack.add_titled_with_icon(&voice_page(ctx), Some("voice"), "Voice", "audio-input-microphone-symbolic");
+    stack.add_titled_with_icon(&colors_page(ctx), Some("colors"), "Colors", "applications-graphics-symbolic");
+    stack.add_titled_with_icon(&text_page(ctx), Some("text"), "Text", "chat-symbolic");
+    stack.add_titled_with_icon(&advanced_page(ctx), Some("advanced"), "Advanced", "preferences-system-symbolic");
 
-    win.set_titlebar(Some(&HeaderBar::new()));
+    let switcher = adw::ViewSwitcher::builder()
+        .stack(&stack)
+        .policy(adw::ViewSwitcherPolicy::Wide)
+        .build();
+    let header = adw::HeaderBar::builder().title_widget(&switcher).build();
+    let bottom = adw::ViewSwitcherBar::builder().stack(&stack).build();
 
-    let nb = Notebook::new();
-    nb.set_vexpand(true); nb.set_hexpand(true);
-    nb.set_show_border(false);
+    let view = adw::ToolbarView::new();
+    view.add_top_bar(&header);
+    view.set_content(Some(&stack));
+    view.add_bottom_bar(&bottom);
 
-    let (voice_sw, vw) = build_voice_tab();
-    let (colors_sw, cw) = build_colors_tab();
-    let (advanced_sw, aw) = build_advanced_tab();
-    let (text_sw, tw) = build_text_tab();
+    let win = adw::Window::builder()
+        .title("Rust Discord Overlay")
+        .default_width(680)
+        .default_height(760)
+        .width_request(360)
+        .height_request(400)
+        .content(&view)
+        .build();
 
-    nb.append_page(&voice_sw,    Some(&tab_label("Voice")));
-    nb.append_page(&colors_sw,   Some(&tab_label("Colors")));
-    nb.append_page(&advanced_sw, Some(&tab_label("Advanced")));
-    nb.append_page(&text_sw,     Some(&tab_label("Text")));
+    // Narrow window: move the page switcher to the bottom bar
+    let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth, 550.0, adw::LengthUnit::Sp,
+    ));
+    narrow.add_setter(&header, "title-widget", Some(&None::<gtk4::Widget>.to_value()));
+    narrow.add_setter(&bottom, "reveal", Some(&true.to_value()));
+    win.add_breakpoint(narrow);
 
-    let outer = GBox::new(Orientation::Vertical, 0);
-    outer.set_vexpand(true);
-    outer.append(&nb);
-
-    let bar = GBox::new(Orientation::Horizontal, 8);
-    bar.add_css_class("save-bar");
-    bar.set_margin_start(16); bar.set_margin_end(16);
-    bar.set_margin_top(10); bar.set_margin_bottom(10);
-
-    let close_btn = Button::with_label("Close");
-    let save_btn  = Button::builder().label("Save All").build();
-    let apply_btn = Button::builder().label("Apply to Overlay").build();
-    save_btn.add_css_class("suggested-action");
-    apply_btn.add_css_class("suggested-action");
-
-    let spacer = GBox::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    bar.append(&close_btn); bar.append(&spacer);
-    bar.append(&save_btn); bar.append(&apply_btn);
-    outer.append(&bar);
-    win.set_child(Some(&outer));
-
-    // Save once — single write to disk
-    save_btn.connect_clicked(move |_| save_all(&vw, &cw, &aw, &tw));
-
-    apply_btn.connect_clicked(|_| {
-        std::thread::spawn(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().unwrap();
-            let _ = rt.block_on(crate::ipc::send_command(crate::cli::Command::Reload));
-        });
-    });
-
-    let wc = win.clone();
-    close_btn.connect_clicked(move |_| wc.close());
     win
 }
 
-fn tab_label(text: &str) -> Label {
-    let l = Label::new(Some(text));
-    l.set_margin_start(4); l.set_margin_end(4);
-    l
-}
+// ── Pages ─────────────────────────────────────────────────────────────────────
 
-fn build_voice_tab() -> (ScrolledWindow, VoiceWidgets) {
-    let cfg = Config::load();
-    let g = make_grid();
-    let mut r = 0i32;
+fn voice_page(ctx: &Ctx) -> adw::PreferencesPage {
+    let c = ctx.cfg.borrow().voice.clone();
+    let page = adw::PreferencesPage::new();
 
-    section(&g, "POSITION", r); r += 1;
-    let anchor = make_dd(&["Bottom Left","Bottom Right","Top Left","Top Right"],
-        match cfg.voice.anchor { Anchor::BottomLeft=>0, Anchor::BottomRight=>1, Anchor::TopLeft=>2, Anchor::TopRight=>3 });
-    wide(&g, "Corner", &anchor, r); r += 1;
-    let x = num(&g, "Offset X (px)", cfg.voice.x as f64, 0.0, 3840.0, r); r += 1;
-    let y = num(&g, "Offset Y (px)", cfg.voice.y as f64, 0.0, 2160.0, r); r += 1;
+    let g = group(&page, "Position", Some("Where the voice overlay sits on screen"));
+    g.add(&combo(ctx, "Corner", &ANCHORS, c.anchor, |cfg, v| cfg.voice.anchor = v));
+    g.add(&spin(ctx, "Horizontal offset", "px", c.x as f64, 0.0, 3840.0, |cfg, v| cfg.voice.x = v as i32));
+    g.add(&spin(ctx, "Vertical offset", "px", c.y as f64, 0.0, 2160.0, |cfg, v| cfg.voice.y = v as i32));
 
-    section(&g, "AVATAR", r); r += 1;
-    let show_av  = tog(&g, "Show avatar",      cfg.voice.show_avatar,   r); r += 1;
-    let square   = tog(&g, "Square avatar",    cfg.voice.square_avatar, r); r += 1;
-    let fancy    = tog(&g, "Fancy border",     cfg.voice.fancy_border,  r); r += 1;
-    let av_size  = num(&g, "Size (px)",        cfg.voice.icon_size as f64, 16.0, 128.0, r); r += 1;
-    let opacity  = num(&g, "Opacity %",        cfg.voice.icon_transparency*100.0, 0.0, 100.0, r); r += 1;
+    let g = group(&page, "Avatars", None);
+    g.add(&switch(ctx, "Show avatars", None, c.show_avatar, |cfg, v| cfg.voice.show_avatar = v));
+    g.add(&switch(ctx, "Square avatars", None, c.square_avatar, |cfg, v| cfg.voice.square_avatar = v));
+    g.add(&switch(ctx, "Fancy border", None, c.fancy_border, |cfg, v| cfg.voice.fancy_border = v));
+    g.add(&spin(ctx, "Size", "px", c.icon_size as f64, 16.0, 128.0, |cfg, v| cfg.voice.icon_size = v as u32));
+    g.add(&spin(ctx, "Opacity", "%", c.icon_transparency * 100.0, 0.0, 100.0,
+        |cfg, v| cfg.voice.icon_transparency = v / 100.0));
 
-    section(&g, "NAMES", r); r += 1;
-    let show_names = tog(&g, "Show names",     cfg.voice.show_names,    r); r += 1;
-    let nick_len = num(&g, "Max length",       cfg.voice.nick_length as f64, 1.0, 64.0, r); r += 1;
+    let g = group(&page, "Names", None);
+    g.add(&switch(ctx, "Show names", None, c.show_names, |cfg, v| cfg.voice.show_names = v));
+    g.add(&spin(ctx, "Maximum length", "characters", c.nick_length as f64, 1.0, 64.0,
+        |cfg, v| cfg.voice.nick_length = v as u32));
 
-    section(&g, "LAYOUT", r); r += 1;
-    let horiz    = tog(&g, "Horizontal layout",cfg.voice.horizontal,    r); r += 1;
-    let spacing  = num(&g, "User spacing (px)",cfg.voice.icon_spacing as f64, 0.0, 64.0, r); r += 1;
-    let vpad     = num(&g, "Vert. edge padding",  cfg.voice.vert_edge_padding as f64, 0.0, 400.0, r); r += 1;
-    let hpad     = num(&g, "Horiz. edge padding", cfg.voice.horz_edge_padding as f64, 0.0, 400.0, r); r += 1;
-    let order    = make_dd(&["Alphabetically","By ID","Last spoken"],
-        match cfg.voice.order { AvatarOrder::Alphabetical=>0, AvatarOrder::Id=>1, AvatarOrder::LastSpoken=>2 });
-    wide(&g, "Order by", &order, r); r += 1;
+    let g = group(&page, "Layout", None);
+    g.add(&switch(ctx, "Horizontal layout", Some("Place users side by side"), c.horizontal,
+        |cfg, v| cfg.voice.horizontal = v));
+    g.add(&combo(ctx, "Order", &ORDERS, c.order, |cfg, v| cfg.voice.order = v));
+    g.add(&spin(ctx, "Spacing between users", "px", c.icon_spacing as f64, 0.0, 64.0,
+        |cfg, v| cfg.voice.icon_spacing = v as i32));
+    g.add(&spin(ctx, "Vertical edge padding", "px", c.vert_edge_padding as f64, 0.0, 400.0,
+        |cfg, v| cfg.voice.vert_edge_padding = v as i32));
+    g.add(&spin(ctx, "Horizontal edge padding", "px", c.horz_edge_padding as f64, 0.0, 400.0,
+        |cfg, v| cfg.voice.horz_edge_padding = v as i32));
 
-    section(&g, "VISIBILITY", r); r += 1;
-    let only_sp  = tog(&g, "Speakers only",    cfg.voice.only_speaking,     r); r += 1;
-    let grace    = num(&g, "Grace period (s)", cfg.voice.only_speaking_grace as f64, 0.0, 360.0, r); r += 1;
-    let hl_self  = tog(&g, "Highlight self",   cfg.voice.highlight_self,    r); r += 1;
-    let sh_title = tog(&g, "Show title",       cfg.voice.show_title,        r); r += 1;
-    let sh_conn  = tog(&g, "Show connection",  cfg.voice.show_connection,   r); r += 1;
-    let sh_disc  = tog(&g, "Show disconnected",cfg.voice.show_disconnected, r); r += 1;
-    let fade_t   = num(&g, "Fade timeout (s)", cfg.voice.fade_time, 1.0, 60.0, r); r += 1;
+    let g = group(&page, "Visibility", None);
+    g.add(&switch(ctx, "Speakers only", Some("Hide users who are not talking"), c.only_speaking,
+        |cfg, v| cfg.voice.only_speaking = v));
+    g.add(&spin(ctx, "Fade timeout", "seconds after they stop talking", c.fade_time, 1.0, 60.0,
+        |cfg, v| cfg.voice.fade_time = v));
+    g.add(&spin(ctx, "Grace period", "seconds", c.only_speaking_grace as f64, 0.0, 360.0,
+        |cfg, v| cfg.voice.only_speaking_grace = v as u32));
+    g.add(&switch(ctx, "Highlight self", None, c.highlight_self, |cfg, v| cfg.voice.highlight_self = v));
+    g.add(&switch(ctx, "Show channel title", None, c.show_title, |cfg, v| cfg.voice.show_title = v));
+    g.add(&switch(ctx, "Show connection status", None, c.show_connection,
+        |cfg, v| cfg.voice.show_connection = v));
+    g.add(&switch(ctx, "Show when disconnected", None, c.show_disconnected,
+        |cfg, v| cfg.voice.show_disconnected = v));
 
-    section(&g, "INACTIVITY FADE", r); r += 1;
-    let fade_en  = tog(&g, "Enable fade-out",  cfg.voice.fade_out_inactive,  r); r += 1;
-    let fade_min = num(&g, "Min opacity %",    cfg.voice.fade_out_limit*100.0, 0.0, 100.0, r); r += 1;
-    let inact_t  = num(&g, "Inactive after (s)",cfg.voice.inactive_time as f64, 1.0, 300.0, r); r += 1;
-    let fade_dur = num(&g, "Fade duration (s)",cfg.voice.inactive_fade_time as f64, 1.0, 300.0, r);
-
-    let w = VoiceWidgets { anchor, x, y, show_av, square, fancy, av_size, opacity,
-        show_names, nick_len, horiz, spacing, vpad, hpad, order, only_sp, grace,
-        hl_self, sh_title, sh_conn, sh_disc, fade_t, fade_en, fade_min, inact_t, fade_dur };
-    (wrap(g), w)
-}
-
-fn build_colors_tab() -> (ScrolledWindow, ColorWidgets) {
-    let cfg = Config::load();
-    let g = make_grid();
-    let mut r = 0i32;
-
-    for (col, txt) in [(1i32,"Foreground"),(2,"Background"),(3,"Border")] {
-        let l = Label::new(Some(txt));
-        l.add_css_class("dim-label"); l.set_halign(Align::Center);
-        g.attach(&l, col, r, 1, 1);
+    let g = group(&page, "Inactivity Fade", Some("Dim users who have been quiet for a while"));
+    let fade = adw::ExpanderRow::builder()
+        .title("Fade out inactive users")
+        .show_enable_switch(true)
+        .enable_expansion(c.fade_out_inactive)
+        .build();
+    {
+        let ctx = ctx.clone();
+        fade.connect_enable_expansion_notify(move |r| {
+            let v = r.enables_expansion();
+            ctx.edit(|cfg| cfg.voice.fade_out_inactive = v);
+        });
     }
-    r += 1;
+    fade.add_row(&spin(ctx, "Inactive after", "seconds", c.inactive_time as f64, 1.0, 300.0,
+        |cfg, v| cfg.voice.inactive_time = v as u32));
+    fade.add_row(&spin(ctx, "Fade duration", "seconds", c.inactive_fade_time as f64, 1.0, 300.0,
+        |cfg, v| cfg.voice.inactive_fade_time = v as u32));
+    fade.add_row(&spin(ctx, "Minimum opacity", "%", c.fade_out_limit * 100.0, 0.0, 100.0,
+        |cfg, v| cfg.voice.fade_out_limit = v / 100.0));
+    g.add(&fade);
 
-    section(&g, "TALKING", r); r += 1;
-    let tk_fg = cdbtn(cfg.voice.talking_color);
-    let tk_bg = cdbtn(cfg.voice.talking_bg_color);
-    let tk_bo = cdbtn(cfg.voice.talking_border_color);
-    cr3(&g, "Colors", &tk_fg, &tk_bg, &tk_bo, r); r += 1;
-
-    section(&g, "IDLE", r); r += 1;
-    let id_fg = cdbtn(cfg.voice.idle_color);
-    let id_bg = cdbtn(cfg.voice.idle_bg_color);
-    let id_bo = cdbtn(cfg.voice.idle_border_color);
-    cr3(&g, "Colors", &id_fg, &id_bg, &id_bo, r); r += 1;
-
-    section(&g, "MUTED", r); r += 1;
-    let mt_fg = cdbtn(cfg.voice.mute_color);
-    let mt_bg = cdbtn(cfg.voice.mute_bg_color);
-    let ph1   = cdbtn([0.0,0.0,0.0,0.0]); ph1.set_sensitive(false);
-    cr3(&g, "Colors", &mt_fg, &mt_bg, &ph1, r); r += 1;
-
-    section(&g, "OVERLAY", r); r += 1;
-    let bg_pill = cdbtn(cfg.voice.bg_color);
-    let av_bg   = cdbtn(cfg.voice.avatar_bg_color);
-    let ph2     = cdbtn([0.0,0.0,0.0,0.0]); ph2.set_sensitive(false);
-    cr3(&g, "Colors", &bg_pill, &av_bg, &ph2, r);
-
-    let w = ColorWidgets { tk_fg, tk_bg, tk_bo, id_fg, id_bg, id_bo, mt_fg, mt_bg, bg_pill, av_bg };
-    (wrap(g), w)
+    page
 }
 
-fn build_advanced_tab() -> (ScrolledWindow, AdvancedWidgets) {
-    let cfg = Config::load();
-    let g = make_grid();
-    let mut r = 0i32;
+fn colors_page(ctx: &Ctx) -> adw::PreferencesPage {
+    let c = ctx.cfg.borrow().voice.clone();
+    let page = adw::PreferencesPage::new();
 
-    section(&g, "AUDIO", r); r += 1;
-    let audio = tog(&g, "Sync with PulseAudio/PipeWire", cfg.audio_assist, r); r += 1;
+    let g = group(&page, "Talking", None);
+    g.add(&color(ctx, "Name", c.talking_color, |cfg, v| cfg.voice.talking_color = v));
+    g.add(&color(ctx, "Background", c.talking_bg_color, |cfg, v| cfg.voice.talking_bg_color = v));
+    g.add(&color(ctx, "Border", c.talking_border_color, |cfg, v| cfg.voice.talking_border_color = v));
 
-    section(&g, "DEBUG", r); r += 1;
-    let test_users = tog(&g, "Show test avatars when not in a call", cfg.show_test_users, r); r += 1;
-    let note = Label::new(Some("Requires overlay restart"));
-    note.add_css_class("dim-label"); note.set_halign(Align::Start);
-    g.attach(&note, 0, r, 4, 1); r += 1;
+    let g = group(&page, "Idle", None);
+    g.add(&color(ctx, "Name", c.idle_color, |cfg, v| cfg.voice.idle_color = v));
+    g.add(&color(ctx, "Background", c.idle_bg_color, |cfg, v| cfg.voice.idle_bg_color = v));
+    g.add(&color(ctx, "Border", c.idle_border_color, |cfg, v| cfg.voice.idle_border_color = v));
 
-    section(&g, "FONT", r); r += 1;
-    let font_btn = FontDialogButton::new(Some(FontDialog::builder().build()));
-    font_btn.set_font_desc(&gtk4::pango::FontDescription::from_string(&cfg.voice.font));
-    wide(&g, "Names font", &font_btn, r); r += 1;
+    let g = group(&page, "Muted", None);
+    g.add(&color(ctx, "Name and badges", c.mute_color, |cfg, v| cfg.voice.mute_color = v));
+    g.add(&color(ctx, "Background", c.mute_bg_color, |cfg, v| cfg.voice.mute_bg_color = v));
 
-    section(&g, "TEXT", r); r += 1;
-    let tpad = num(&g, "Padding (px)",    cfg.voice.text_padding as f64, 0.0, 64.0, r); r += 1;
-    let tadj = num(&g, "Vertical offset", cfg.voice.text_baseline_adj as f64, -100.0, 100.0, r); r += 1;
+    let g = group(&page, "Overlay", None);
+    g.add(&color(ctx, "Window background", c.bg_color, |cfg, v| cfg.voice.bg_color = v));
+    g.add(&color(ctx, "Avatar placeholder", c.avatar_bg_color, |cfg, v| cfg.voice.avatar_bg_color = v));
 
-    section(&g, "BORDER", r); r += 1;
-    let bw = num(&g, "Width (px)", cfg.voice.border_width as f64, 0.0, 20.0, r);
-
-    let w = AdvancedWidgets { audio, test_users, font_btn, tpad, tadj, bw };
-    (wrap(g), w)
+    page
 }
 
-fn build_text_tab() -> (ScrolledWindow, TextWidgets) {
-    let cfg = Config::load();
-    let g = make_grid();
-    let mut r = 0i32;
+fn text_page(ctx: &Ctx) -> adw::PreferencesPage {
+    let c = ctx.cfg.borrow().text.clone();
+    let page = adw::PreferencesPage::new();
 
-    section(&g, "TEXT CHANNEL OVERLAY", r); r += 1;
-    let enabled = tog(&g, "Enabled",           cfg.text.enabled,          r); r += 1;
-    let popup   = tog(&g, "Popup style",       cfg.text.popup_style,      r); r += 1;
-    let attach  = tog(&g, "Show attachments",  cfg.text.show_attachments, r); r += 1;
-    let limit   = num(&g, "Message limit",     cfg.text.message_limit as f64, 1.0, 200.0, r); r += 1;
-    let ptime   = num(&g, "Popup time (s)",    cfg.text.popup_time as f64, 1.0, 300.0, r); r += 1;
+    let g = group(&page, "Text Channel Overlay", Some("Show messages from a text channel"));
+    g.add(&switch(ctx, "Enabled", Some("Requires an overlay restart"), c.enabled,
+        |cfg, v| cfg.text.enabled = v));
+    let ch = adw::EntryRow::builder().title("Channel ID").text(c.channel_id.as_str()).build();
+    {
+        let ctx = ctx.clone();
+        ch.connect_changed(move |e| {
+            let v = e.text().trim().to_string();
+            ctx.edit(|cfg| cfg.text.channel_id = v);
+        });
+    }
+    g.add(&ch);
+    g.add(&spin(ctx, "Message limit", "messages", c.message_limit as f64, 1.0, 200.0,
+        |cfg, v| cfg.text.message_limit = v as usize));
+    g.add(&switch(ctx, "Popup style", None, c.popup_style, |cfg, v| cfg.text.popup_style = v));
+    g.add(&spin(ctx, "Popup time", "seconds", c.popup_time as f64, 1.0, 300.0,
+        |cfg, v| cfg.text.popup_time = v as u32));
+    g.add(&switch(ctx, "Show attachments", None, c.show_attachments, |cfg, v| cfg.text.show_attachments = v));
 
-    section(&g, "POSITION", r); r += 1;
-    let anch = make_dd(&["Bottom Left","Bottom Right","Top Left","Top Right"],
-        match cfg.text.anchor { Anchor::BottomLeft=>0, Anchor::BottomRight=>1, Anchor::TopLeft=>2, Anchor::TopRight=>3 });
-    wide(&g, "Corner", &anch, r); r += 1;
-    let tx = num(&g, "Offset X", cfg.text.x as f64, 0.0, 3840.0, r); r += 1;
-    let ty = num(&g, "Offset Y", cfg.text.y as f64, 0.0, 2160.0, r); r += 1;
+    let g = group(&page, "Position", None);
+    g.add(&combo(ctx, "Corner", &ANCHORS, c.anchor, |cfg, v| cfg.text.anchor = v));
+    g.add(&spin(ctx, "Horizontal offset", "px", c.x as f64, 0.0, 3840.0, |cfg, v| cfg.text.x = v as i32));
+    g.add(&spin(ctx, "Vertical offset", "px", c.y as f64, 0.0, 2160.0, |cfg, v| cfg.text.y = v as i32));
 
-    section(&g, "CHANNEL", r); r += 1;
-    let ch = gtk4::Entry::builder()
-        .text(cfg.text.channel_id.as_str())
-        .placeholder_text("Paste Discord text channel ID here")
-        .hexpand(true).build();
-    g.attach(&ch, 0, r, 4, 1); r += 1;
+    let g = group(&page, "Colors", None);
+    g.add(&color(ctx, "Text", c.fg_color, |cfg, v| cfg.text.fg_color = v));
+    g.add(&color(ctx, "Background", c.bg_color, |cfg, v| cfg.text.bg_color = v));
 
-    section(&g, "COLORS", r); r += 1;
-    let fg = cdbtn(cfg.text.fg_color);
-    let bg = cdbtn(cfg.text.bg_color);
-    let ph = cdbtn([0.0,0.0,0.0,0.0]); ph.set_sensitive(false);
-    cr3(&g, "Text / Background", &fg, &bg, &ph, r);
-
-    let w = TextWidgets { enabled, popup, attach, limit, ptime, anch, tx, ty, ch, fg, bg };
-    (wrap(g), w)
+    page
 }
 
-// ── Widget helpers ────────────────────────────────────────────────────────────
+fn advanced_page(ctx: &Ctx) -> adw::PreferencesPage {
+    let c = ctx.cfg.borrow().clone();
+    let page = adw::PreferencesPage::new();
 
-fn make_grid() -> Grid {
-    let g = Grid::new();
-    g.set_row_spacing(2); g.set_column_spacing(12);
-    g.set_margin_top(16); g.set_margin_bottom(16);
-    g.set_margin_start(20); g.set_margin_end(20);
-    g.set_hexpand(true); g.set_vexpand(true);
+    let g = group(&page, "Audio", None);
+    g.add(&switch(ctx, "Sync with PulseAudio/PipeWire",
+        Some("Mirror system mic/speaker mute to Discord · requires restart"),
+        c.audio_assist, |cfg, v| cfg.audio_assist = v));
+
+    let g = group(&page, "Font", None);
+    let font_btn = FontDialogButton::new(Some(FontDialog::new()));
+    font_btn.set_font_desc(&pango::FontDescription::from_string(&c.voice.font));
+    font_btn.set_valign(Align::Center);
+    {
+        let ctx = ctx.clone();
+        font_btn.connect_font_desc_notify(move |b| {
+            if let Some(fd) = b.font_desc() {
+                let v = fd.to_string();
+                ctx.edit(|cfg| cfg.voice.font = v);
+            }
+        });
+    }
+    let row = adw::ActionRow::builder().title("Names font").activatable_widget(&font_btn).build();
+    row.add_suffix(&font_btn);
+    g.add(&row);
+    g.add(&spin(ctx, "Text padding", "px", c.voice.text_padding as f64, 0.0, 64.0,
+        |cfg, v| cfg.voice.text_padding = v as i32));
+    g.add(&spin(ctx, "Text vertical offset", "px", c.voice.text_baseline_adj as f64, -100.0, 100.0,
+        |cfg, v| cfg.voice.text_baseline_adj = v as i32));
+
+    let g = group(&page, "Border", None);
+    g.add(&spin(ctx, "Border width", "px", c.voice.border_width as f64, 0.0, 20.0,
+        |cfg, v| cfg.voice.border_width = v as u32));
+
+    let g = group(&page, "Debug", None);
+    g.add(&switch(ctx, "Show test users", Some("Preview avatars when you are not in a call"),
+        c.show_test_users, |cfg, v| cfg.show_test_users = v));
+
+    let g = group(&page, "Configuration", Some(&Config::config_path().display().to_string()));
+    let open = gtk4::Button::builder()
+        .icon_name("folder-open-symbolic")
+        .tooltip_text("Open config folder")
+        .valign(Align::Center)
+        .css_classes(["flat"])
+        .build();
+    open.connect_clicked(|_| {
+        let uri = glib::filename_to_uri(Config::config_dir(), None).map(|u| u.to_string());
+        if let Ok(uri) = uri {
+            gtk4::UriLauncher::new(&uri).launch(None::<&gtk4::Window>, None::<&gtk4::gio::Cancellable>, |_| {});
+        }
+    });
+    let row = adw::ActionRow::builder().title("Config file").activatable_widget(&open).build();
+    row.add_suffix(&open);
+    g.add(&row);
+
+    page
+}
+
+// ── Row helpers ───────────────────────────────────────────────────────────────
+
+fn group(page: &adw::PreferencesPage, title: &str, desc: Option<&str>) -> adw::PreferencesGroup {
+    let g = adw::PreferencesGroup::builder().title(title).build();
+    if let Some(d) = desc { g.set_description(Some(d)); }
+    page.add(&g);
     g
 }
 
-fn section(g: &Grid, text: &str, row: i32) {
-    let l = Label::new(Some(text));
-    l.add_css_class("section-header");
-    l.set_halign(Align::Start);
-    l.set_margin_top(14); l.set_margin_bottom(2);
-    g.attach(&l, 0, row, 4, 1);
+fn switch(ctx: &Ctx, title: &str, subtitle: Option<&str>, active: bool,
+          set: impl Fn(&mut Config, bool) + 'static) -> adw::SwitchRow {
+    let row = adw::SwitchRow::builder().title(title).active(active).build();
+    if let Some(s) = subtitle { row.set_subtitle(s); }
+    let ctx = ctx.clone();
+    row.connect_active_notify(move |r| {
+        let v = r.is_active();
+        ctx.edit(|cfg| set(cfg, v));
+    });
+    row
 }
 
-fn num(g: &Grid, label: &str, val: f64, min: f64, max: f64, row: i32) -> SpinButton {
-    let lbl = Label::new(Some(label));
-    lbl.set_halign(Align::Start); lbl.set_hexpand(true);
-    let sp = SpinButton::new(Some(&Adjustment::new(val,min,max,1.0,10.0,0.0)),1.0,0);
-    sp.set_width_request(110);
-    g.attach(&lbl, 0, row, 3, 1);
-    g.attach(&sp,  3, row, 1, 1);
-    sp
+#[allow(clippy::too_many_arguments)]
+fn spin(ctx: &Ctx, title: &str, unit: &str, value: f64, min: f64, max: f64,
+        set: impl Fn(&mut Config, f64) + 'static) -> adw::SpinRow {
+    let row = adw::SpinRow::with_range(min, max, 1.0);
+    row.set_title(title);
+    row.set_subtitle(unit);
+    row.set_value(value);
+    let ctx = ctx.clone();
+    row.connect_value_notify(move |r| {
+        let v = r.value();
+        ctx.edit(|cfg| set(cfg, v));
+    });
+    row
 }
 
-fn tog(g: &Grid, label: &str, active: bool, row: i32) -> Switch {
-    let lbl = Label::new(Some(label));
-    lbl.set_halign(Align::Start); lbl.set_hexpand(true);
-    let sw = Switch::new();
-    sw.set_active(active); sw.set_valign(Align::Center); sw.set_halign(Align::End);
-    g.attach(&lbl, 0, row, 3, 1);
-    g.attach(&sw,  3, row, 1, 1);
-    sw
+fn combo<T: Copy + PartialEq + 'static>(ctx: &Ctx, title: &str, options: &'static [(&str, T)],
+                                        current: T, set: impl Fn(&mut Config, T) + 'static) -> adw::ComboRow {
+    let labels: Vec<&str> = options.iter().map(|(l, _)| *l).collect();
+    let row = adw::ComboRow::builder().title(title).model(&StringList::new(&labels)).build();
+    row.set_selected(options.iter().position(|(_, v)| *v == current).unwrap_or(0) as u32);
+    let ctx = ctx.clone();
+    row.connect_selected_notify(move |r| {
+        if let Some((_, v)) = options.get(r.selected() as usize) {
+            let v = *v;
+            ctx.edit(|cfg| set(cfg, v));
+        }
+    });
+    row
 }
 
-fn wide(g: &Grid, label: &str, w: &impl IsA<gtk4::Widget>, row: i32) {
-    let lbl = Label::new(Some(label));
-    lbl.set_halign(Align::Start); lbl.set_hexpand(true);
-    g.attach(&lbl, 0, row, 2, 1);
-    g.attach(w,    2, row, 2, 1);
-}
-
-fn cr3(g: &Grid, label: &str, w1: &gtk4::ColorDialogButton,
-       w2: &gtk4::ColorDialogButton, w3: &gtk4::ColorDialogButton, row: i32) {
-    let lbl = Label::new(Some(label));
-    lbl.set_halign(Align::Start); lbl.set_hexpand(true);
-    g.attach(&lbl, 0, row, 1, 1);
-    g.attach(w1, 1, row, 1, 1);
-    g.attach(w2, 2, row, 1, 1);
-    g.attach(w3, 3, row, 1, 1);
-}
-
-fn make_dd(opts: &[&str], active: u32) -> DropDown {
-    let d = DropDown::new(Some(StringList::new(opts)), gtk4::Expression::NONE);
-    d.set_selected(active); d
-}
-
-fn cdbtn(c: [f64;4]) -> gtk4::ColorDialogButton {
-    let d = gtk4::ColorDialog::builder().with_alpha(true).build();
-    let b = gtk4::ColorDialogButton::new(Some(d));
-    b.set_rgba(&gtk4::gdk::RGBA::new(c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32));
-    b.set_halign(Align::Center);
-    b
-}
-
-fn rgba(b: &gtk4::ColorDialogButton) -> [f64;4] {
-    let c = b.rgba();
-    [c.red() as f64, c.green() as f64, c.blue() as f64, c.alpha() as f64]
-}
-
-fn wrap(g: Grid) -> ScrolledWindow {
-    ScrolledWindow::builder()
-        .hscrollbar_policy(PolicyType::Never)
-        .vscrollbar_policy(PolicyType::Automatic)
-        .hexpand(true).vexpand(true)
-        .child(&g).build()
+fn color(ctx: &Ctx, title: &str, c: [f64; 4],
+         set: impl Fn(&mut Config, [f64; 4]) + 'static) -> adw::ActionRow {
+    let btn = ColorDialogButton::new(Some(ColorDialog::builder().with_alpha(true).build()));
+    btn.set_rgba(&gdk::RGBA::new(c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32));
+    btn.set_valign(Align::Center);
+    let ctx = ctx.clone();
+    btn.connect_rgba_notify(move |b| {
+        let c = b.rgba();
+        let v = [c.red() as f64, c.green() as f64, c.blue() as f64, c.alpha() as f64];
+        ctx.edit(|cfg| set(cfg, v));
+    });
+    let row = adw::ActionRow::builder().title(title).activatable_widget(&btn).build();
+    row.add_suffix(&btn);
+    row
 }

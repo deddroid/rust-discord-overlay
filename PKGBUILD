@@ -6,7 +6,7 @@ pkgdesc="Discord voice/text overlay for Linux, written in Rust"
 arch=('x86_64')
 url="https://github.com/deddroid/rust-discord-overlay"
 license=('GPL3')
-depends=('gtk4' 'gtk4-layer-shell' 'cairo' 'dbus')
+depends=('gtk4' 'gtk4-layer-shell' 'libadwaita' 'cairo' 'dbus')
 makedepends=('rust' 'cargo' 'pkg-config')
 optdepends=(
     'librsvg: for multi-size icon installation'

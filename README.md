@@ -46,9 +46,9 @@ yay -S rust-discord-overlay
 
 | Distro | Command |
 |---|---|
-| Debian / Ubuntu | `sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libcairo2-dev pkg-config` |
-| Fedora | `sudo dnf install gtk4-devel gtk4-layer-shell-devel cairo-devel pkg-config` |
-| Arch | `sudo pacman -S gtk4 gtk4-layer-shell cairo pkg-config` |
+| Debian / Ubuntu | `sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libadwaita-1-dev libcairo2-dev pkg-config` |
+| Fedora | `sudo dnf install gtk4-devel gtk4-layer-shell-devel libadwaita-devel cairo-devel pkg-config` |
+| Arch | `sudo pacman -S gtk4 gtk4-layer-shell libadwaita cairo pkg-config` |
 
 You also need Rust:
 ```bash
@@ -92,7 +92,7 @@ You can also use the **system tray icon** to open settings, hide/show the overla
 
 Settings are stored at `~/.config/rust-discord-overlay/config.toml` and are created automatically on first run.
 
-Open the settings window with `rust-discord-overlay configure` (or tray → Settings…), change what you need, then click **Save All** and **Apply to Overlay**.
+Open the settings window with `rust-discord-overlay configure` (or tray → Settings…), change what you need — every change is saved and applied to the running overlay automatically.
 
 ---
 
