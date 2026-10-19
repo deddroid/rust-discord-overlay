@@ -75,8 +75,10 @@ pub async fn run(state: SharedState, mut rx: Receiver<RpcEvent>, tx: EventTx) {
                     }
                     _ => {}
                 }
-                vw.queue_draw();
-                tw.iter().for_each(|w| w.queue_draw());
+                // Redraw the DrawingAreas themselves: queue_draw on the window
+                // reuses the children's cached render nodes in GTK4
+                redraw_content(&vw);
+                tw.iter().for_each(redraw_content);
             }
         });
     });
@@ -97,6 +99,12 @@ fn re_fetch_avatars(state: &SharedState, tx: &EventTx) {
         if let Some(url) = url {
             crate::avatar::fetch_avatar(state.clone(), tx.clone(), uid, url, icon_size);
         }
+    }
+}
+
+fn redraw_content(win: &ApplicationWindow) {
+    if let Some(child) = win.child() {
+        child.queue_draw();
     }
 }
 
