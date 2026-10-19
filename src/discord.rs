@@ -180,7 +180,7 @@ async fn authorize_full(
     };
 
     info!("Auth code ottenuto, scambio con Streamkit...");
-    let resp = reqwest::Client::new()
+    let resp = crate::avatar::http_client()
         .post(STREAMKIT_URL)
         .json(&json!({ "code": code }))
         .send().await?
@@ -266,7 +266,8 @@ async fn handle_event(
 
             {
                 let mut s = state.lock().unwrap();
-                s.voice_users.clear();
+                // Keep already-downloaded avatars instead of re-fetching everyone
+                let mut previous = std::mem::take(&mut s.voice_users);
                 s.channel_name = Some(ch_name);
 
                 if let Some(states) = data["voice_states"].as_array() {
@@ -274,10 +275,17 @@ async fn handle_event(
                         debug!("voice_state sample: {first}");
                     }
                     for vs in states {
-                        let user = parse_voice_user(vs);
+                        let mut user = parse_voice_user(vs);
                         info!("Utente: {} | avatar: {:?}", user.username, user.avatar_url);
-                        if let Some(url) = &user.avatar_url {
-                            to_fetch.push((user.user_id.clone(), url.clone()));
+                        if let Some(old) = previous.remove(&user.user_id) {
+                            if old.avatar_url == user.avatar_url {
+                                user.avatar_cache = old.avatar_cache;
+                            }
+                        }
+                        if user.avatar_cache.is_none() {
+                            if let Some(url) = &user.avatar_url {
+                                to_fetch.push((user.user_id.clone(), url.clone()));
+                            }
                         }
                         s.voice_users.insert(user.user_id.clone(), user);
                     }
@@ -294,15 +302,18 @@ async fn handle_event(
         ("DISPATCH", "VOICE_STATE_CREATE") | ("DISPATCH", "VOICE_STATE_UPDATE") => {
             let mut user = parse_voice_user(data);
             let uid = user.user_id.clone();
-            let icon_size = state.lock().unwrap().config.voice.icon_size;
 
-            // Preserve avatar cache — VOICE_STATE_UPDATE fires on every mute/unmute
-            // If we drop the cache, the avatar disappears until re-downloaded
+            // Preserve avatar cache and speaking state — VOICE_STATE_UPDATE fires on
+            // every mute/unmute. If we drop the cache, the avatar disappears until re-downloaded
             {
                 let mut s = state.lock().unwrap();
+                let icon_size = s.config.voice.icon_size;
                 if let Some(existing) = s.voice_users.get(&uid) {
-                    user.avatar_cache = existing.avatar_cache.clone();
-                    user.avatar_size  = existing.avatar_size;
+                    if existing.avatar_url == user.avatar_url {
+                        user.avatar_cache = existing.avatar_cache.clone();
+                    }
+                    user.speaking   = existing.speaking;
+                    user.last_spoke = existing.last_spoke;
                 }
                 let needs_fetch = user.avatar_cache.is_none();
                 let url = user.avatar_url.clone();
@@ -360,8 +371,8 @@ async fn handle_event(
                 };
                 let mut s = state.lock().unwrap();
                 let lim = s.config.text.message_limit;
-                s.text_messages.push(msg.clone());
-                if s.text_messages.len() > lim { s.text_messages.remove(0); }
+                s.text_messages.push_back(msg.clone());
+                while s.text_messages.len() > lim { s.text_messages.pop_front(); }
                 let _ = tx.send(RpcEvent::MessageCreate(msg));
             }
         }
@@ -384,10 +395,9 @@ fn parse_voice_user(vs: &Value) -> VoiceUser {
 
     let avatar_url = user_obj["avatar"].as_str()
         .filter(|s| !s.is_empty())
-        .map(|hash| {
-            let ext = if hash.starts_with("a_") { "gif" } else { "png" };
-            format!("https://cdn.discordapp.com/avatars/{uid}/{hash}.{ext}?size=128")
-        });
+        // Always PNG: the `image` crate is built without GIF support, and the CDN
+        // serves the first frame of animated (a_*) avatars as PNG too
+        .map(|hash| format!("https://cdn.discordapp.com/avatars/{uid}/{hash}.png?size=128"));
 
     let voice = &vs["voice_state"];
     let mut u = VoiceUser::new(uid, name);
@@ -451,7 +461,7 @@ async fn send(
     ws: &mut (impl SinkExt<Message, Error = impl std::fmt::Debug> + Unpin),
     v: Value,
 ) -> Result<()> {
-    ws.send(Message::Text(v.to_string().into()))
+    ws.send(Message::Text(v.to_string()))
         .await
         .map_err(|e| anyhow!("{e:?}"))
 }

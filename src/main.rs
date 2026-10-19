@@ -94,7 +94,7 @@ async fn run(state: state::SharedState, audio_assist: bool) -> Result<()> {
     }
 
     tray::spawn();
-    overlay::run(state, rx).await;
+    overlay::run(state, rx, tx).await;
 
     ipc::remove_pid();
     Ok(())

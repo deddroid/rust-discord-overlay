@@ -1,8 +1,18 @@
-use crate::{config::{Anchor, AvatarOrder, Config}, discord::RpcEvent, state::{SharedState, VoiceUser}};
+use crate::{
+    config::{Anchor, AvatarOrder, Config, VoiceConfig},
+    discord::{EventTx, RpcEvent},
+    state::{Avatar, SharedState, VoiceUser},
+};
 use gtk4::{cairo, glib, prelude::*, Application, ApplicationWindow, DrawingArea};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
-use std::time::Duration;
+use std::{cell::{Cell, RefCell}, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 use tokio::sync::broadcast::Receiver;
+
+/// Frame interval used only while a fade-out is in progress
+const FADE_FRAME: Duration = Duration::from_millis(50);
+
+/// cairo surfaces built from avatar pixels, reused until the avatar changes
+type SurfaceCache = HashMap<String, (Arc<Avatar>, cairo::ImageSurface)>;
 
 const APP_ID: &str = "io.github.rust_discord_overlay";
 
@@ -13,7 +23,7 @@ fn fake_users() -> Vec<VoiceUser> {
     vec![u1, u2, u3]
 }
 
-pub async fn run(state: SharedState, mut rx: Receiver<RpcEvent>) {
+pub async fn run(state: SharedState, mut rx: Receiver<RpcEvent>, tx: EventTx) {
     let app = Application::builder().application_id(APP_ID).build();
     let state_c = state.clone();
     let (glib_tx, glib_rx) = async_channel::unbounded::<RpcEvent>();
@@ -37,6 +47,8 @@ pub async fn run(state: SharedState, mut rx: Receiver<RpcEvent>) {
         let tw = text_win.clone();
         let st = state_c.clone();
         let rx2 = glib_rx.clone();
+        let tx2 = tx.clone();
+        let last_icon_size = Cell::new(cfg.voice.icon_size);
 
         glib::spawn_future_local(async move {
             while let Ok(evt) = rx2.recv().await {
@@ -50,9 +62,16 @@ pub async fn run(state: SharedState, mut rx: Receiver<RpcEvent>) {
                         tw.iter().for_each(|w| w.set_visible(true));
                     }
                     RpcEvent::Control(crate::cli::Command::Reload) => {
-                        let cfg = st.lock().unwrap().config.clone();
-                        apply_anchor(&vw, cfg.voice.anchor, cfg.voice.x, cfg.voice.y);
-                        re_fetch_avatars(&st);
+                        let (anchor, x, y, icon_size) = {
+                            let s = st.lock().unwrap();
+                            let v = &s.config.voice;
+                            (v.anchor, v.x, v.y, v.icon_size)
+                        };
+                        apply_anchor(&vw, anchor, x, y);
+                        // Avatars are pre-scaled: download again only if the size changed
+                        if last_icon_size.replace(icon_size) != icon_size {
+                            re_fetch_avatars(&st, &tx2);
+                        }
                     }
                     _ => {}
                 }
@@ -65,20 +84,15 @@ pub async fn run(state: SharedState, mut rx: Receiver<RpcEvent>) {
     app.run();
 }
 
-fn re_fetch_avatars(state: &SharedState) {
+fn re_fetch_avatars(state: &SharedState, tx: &EventTx) {
+    // Old avatars stay visible until the new ones arrive
     let (icon_size, users): (u32, Vec<(String, Option<String>)>) = {
-        let mut s = state.lock().unwrap();
-        let size = s.config.voice.icon_size;
-        for u in s.voice_users.values_mut() {
-            u.avatar_cache = None;
-            u.avatar_size  = (0, 0);
-        }
+        let s = state.lock().unwrap();
         let list = s.voice_users.values()
             .map(|u| (u.user_id.clone(), u.avatar_url.clone()))
             .collect();
-        (size, list)
+        (s.config.voice.icon_size, list)
     };
-    let (tx, _) = tokio::sync::broadcast::channel(1);
     for (uid, url) in users {
         if let Some(url) = url {
             crate::avatar::fetch_avatar(state.clone(), tx.clone(), uid, url, icon_size);
@@ -113,64 +127,66 @@ fn build_voice_window(app: &Application, cfg: &Config, state: SharedState) -> Ap
 
     init_layer_shell(&win, cfg.voice.anchor, cfg.voice.x, cfg.voice.y);
 
+    // Redraws are driven by events; a timer runs only while someone is fading out
     let draw = DrawingArea::new();
     {
-        let st = state.clone();
-        draw.set_draw_func(move |_da, cr, _w, _h| {
-            let cfg_live = st.lock().unwrap().config.clone();
-            draw_voice(cr, &st, &cfg_live);
+        let surfaces: RefCell<SurfaceCache> = RefCell::default();
+        let animating = Rc::new(Cell::new(false));
+        let timer_on  = Rc::new(Cell::new(false));
+        draw.set_draw_func(move |da, cr, _w, _h| {
+            animating.set(draw_voice(cr, &state, &mut surfaces.borrow_mut()));
+            if animating.get() && !timer_on.replace(true) {
+                let (da, animating, timer_on) = (da.clone(), animating.clone(), timer_on.clone());
+                glib::timeout_add_local(FADE_FRAME, move || {
+                    if animating.get() && da.is_mapped() {
+                        da.queue_draw();
+                        glib::ControlFlow::Continue
+                    } else {
+                        timer_on.set(false);
+                        glib::ControlFlow::Break
+                    }
+                });
+            }
         });
     }
 
-    let d2 = draw.clone();
-    glib::timeout_add_local(Duration::from_millis(100), move || {
-        d2.queue_draw();
-        glib::ControlFlow::Continue
-    });
-
     win.set_child(Some(&draw));
-    win.connect_realize(|w| set_passthrough(w));
-    win.connect_map(|w| set_passthrough(w));
+    win.connect_realize(set_passthrough);
+    win.connect_map(set_passthrough);
     win.set_visible(true);
     win
 }
 
 // ── Voice rendering ───────────────────────────────────────────────────────────
 
-fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
+/// Draws the voice list. Returns true while a fade-out is in progress (needs more frames).
+fn draw_voice(cr: &cairo::Context, state: &SharedState, surfaces: &mut SurfaceCache) -> bool {
     cr.set_operator(cairo::Operator::Clear);
     cr.paint().ok();
     cr.set_operator(cairo::Operator::Over);
 
-    let vcfg = &cfg.voice;
-
-    let mut users: Vec<VoiceUser> = {
+    // Single lock; cloning users is cheap since avatar pixels are behind an Arc
+    let (vcfg, mut users): (VoiceConfig, Vec<VoiceUser>) = {
         let s = state.lock().unwrap();
-        if s.voice_users.is_empty() {
+        let users = if s.voice_users.is_empty() {
             if s.config.show_test_users { fake_users() } else { vec![] }
         } else {
             s.voice_users.values().cloned().collect()
-        }
+        };
+        (s.config.voice.clone(), users)
     };
 
-    if users.is_empty() { return; }
+    surfaces.retain(|uid, _| users.iter().any(|u| &u.user_id == uid));
+    if users.is_empty() { return false; }
 
     // Sort by user preference
     match vcfg.order {
-        AvatarOrder::Alphabetical => {
-            users.sort_by(|a, b| a.username.to_lowercase().cmp(&b.username.to_lowercase()));
-        }
-        AvatarOrder::Id => {
-            users.sort_by(|a, b| a.user_id.cmp(&b.user_id));
-        }
-        AvatarOrder::LastSpoken => {
-            users.sort_by(|a, b| {
-                let ta = a.last_spoke.map(|t| t.elapsed().as_millis()).unwrap_or(u128::MAX);
-                let tb = b.last_spoke.map(|t| t.elapsed().as_millis()).unwrap_or(u128::MAX);
-                ta.cmp(&tb)
-            });
-        }
+        AvatarOrder::Alphabetical => users.sort_by_cached_key(|u| u.username.to_lowercase()),
+        AvatarOrder::Id => users.sort_by(|a, b| a.user_id.cmp(&b.user_id)),
+        // Most recent first; users who never spoke (None) go last
+        AvatarOrder::LastSpoken => users.sort_by_key(|u| std::cmp::Reverse(u.last_spoke)),
     }
+    let mut animating = false;
 
     let icon    = vcfg.icon_size as f64;
     let ring_w  = (vcfg.border_width as f64).clamp(1.0, 12.0);
@@ -188,6 +204,9 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
 
         if vcfg.only_speaking && !user.speaking && elapsed > vcfg.fade_time {
             continue;
+        }
+        if vcfg.only_speaking && !user.speaking {
+            animating = true;
         }
 
         let fade_alpha: f64 = if user.speaking || !vcfg.only_speaking {
@@ -250,9 +269,8 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
 
         // Avatar
         if vcfg.show_avatar {
-            if let Some(px) = &user.avatar_cache {
-                blit_avatar(cr, px, user.avatar_size.0, user.avatar_size.1,
-                            cx, cy, av_r, alpha, vcfg.square_avatar);
+            if let Some(av) = &user.avatar_cache {
+                blit_avatar(cr, surfaces, &user.user_id, av, cx, cy, av_r, alpha, vcfg.square_avatar);
             } else {
                 let hue = user.user_id.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32));
                 let (pr, pg, pb) = hue_to_rgb(hue as f64 / 255.0);
@@ -313,8 +331,10 @@ fn draw_voice(cr: &cairo::Context, state: &SharedState, cfg: &Config) {
             }
         }
     }
+    animating
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_badge(cr: &cairo::Context, bx: f64, by: f64, r: f64,
               col_r: f64, col_g: f64, col_b: f64, alpha: f64, is_mute: bool) {
     cr.set_source_rgba(col_r, col_g, col_b, alpha);
@@ -353,56 +373,58 @@ fn rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.close_path();
 }
 
-fn blit_avatar(cr: &cairo::Context, pixels: &[u8], pw: u32, ph: u32,
+/// Builds a cairo surface from already-premultiplied ARGB pixels (done once per avatar)
+fn avatar_surface(av: &Avatar) -> Option<cairo::ImageSurface> {
+    if av.width == 0 || av.height == 0 { return None; }
+    cairo::ImageSurface::create_for_data(
+        av.data.clone(), cairo::Format::ARgb32,
+        av.width as i32, av.height as i32, av.stride as i32,
+    ).ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_avatar(cr: &cairo::Context, surfaces: &mut SurfaceCache, uid: &str, av: &Arc<Avatar>,
                cx: f64, cy: f64, r: f64, alpha: f64, square: bool) {
-    if pw == 0 || ph == 0 { return; }
-    let stride = cairo::Format::ARgb32.stride_for_width(pw).unwrap_or(0) as usize;
-    let mut argb = vec![0u8; ph as usize * stride];
-    for row in 0..ph as usize {
-        for col in 0..pw as usize {
-            let src = (row * pw as usize + col) * 4;
-            let dst =  row * stride + col * 4;
-            if src+3 >= pixels.len() || dst+3 >= argb.len() { break; }
-            let a  = (pixels[src+3] as f64 * alpha) as u8;
-            let pm = |c: u8| ((c as u32 * a as u32) / 255) as u8;
-            argb[dst+3]=a; argb[dst+2]=pm(pixels[src]);
-            argb[dst+1]=pm(pixels[src+1]); argb[dst]=pm(pixels[src+2]);
-        }
+    let cached = matches!(surfaces.get(uid), Some((a, _)) if Arc::ptr_eq(a, av));
+    if !cached {
+        let Some(surf) = avatar_surface(av) else { return };
+        surfaces.insert(uid.to_string(), (av.clone(), surf));
     }
-    if let Ok(surf) = cairo::ImageSurface::create_for_data(
-        argb, cairo::Format::ARgb32, pw as i32, ph as i32, stride as i32) {
-        cr.save().ok();
-        if square {
-            cr.rectangle(cx-r, cy-r, r*2.0, r*2.0);
-        } else {
-            cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
-        }
-        cr.clip();
-        cr.set_source_surface(&surf, cx-r, cy-r).ok();
-        cr.paint().ok();
-        cr.restore().ok();
+    let surf = &surfaces[uid].1;
+
+    cr.save().ok();
+    if square {
+        cr.rectangle(cx-r, cy-r, r*2.0, r*2.0);
+    } else {
+        cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
     }
+    cr.clip();
+    cr.set_source_surface(surf, cx-r, cy-r).ok();
+    cr.paint_with_alpha(alpha).ok();
+    cr.restore().ok();
 }
 
 // ── Text window ───────────────────────────────────────────────────────────────
 
 fn build_text_window(app: &Application, state: SharedState) -> ApplicationWindow {
-    let cfg = state.lock().unwrap().config.clone();
+    let cfg = state.lock().unwrap().config.text.clone();
     let win = ApplicationWindow::builder()
         .application(app).title("rust-discord-overlay-text")
-        .default_width(cfg.text.width).default_height(cfg.text.height)
+        .default_width(cfg.width).default_height(cfg.height)
         .decorated(false).build();
-    init_layer_shell(&win, cfg.text.anchor, cfg.text.x, cfg.text.y);
+    init_layer_shell(&win, cfg.anchor, cfg.x, cfg.y);
     let draw = DrawingArea::new();
     draw.set_draw_func(move |_da, cr, _w, h| {
-        let cfg_live = state.lock().unwrap().config.clone();
-        let msgs: Vec<_> = state.lock().unwrap().text_messages.clone();
+        let (bg_color, fg_color, msgs) = {
+            let s = state.lock().unwrap();
+            (s.config.text.bg_color, s.config.text.fg_color, s.text_messages.clone())
+        };
         cr.set_operator(cairo::Operator::Clear); cr.paint().ok();
         cr.set_operator(cairo::Operator::Over);
         if msgs.is_empty() { return; }
-        let [br,bg,bb,ba] = cfg_live.text.bg_color;
+        let [br,bg,bb,ba] = bg_color;
         cr.set_source_rgba(br,bg,bb,ba); cr.paint().ok();
-        let [fr,fg,fb,fa] = cfg_live.text.fg_color;
+        let [fr,fg,fb,fa] = fg_color;
         cr.set_source_rgba(fr,fg,fb,fa);
         let mut y = h as f64 - 6.0;
         for msg in msgs.iter().rev() {
@@ -412,8 +434,8 @@ fn build_text_window(app: &Application, state: SharedState) -> ApplicationWindow
         }
     });
     win.set_child(Some(&draw));
-    win.connect_realize(|w| set_passthrough(w));
-    win.connect_map(|w| set_passthrough(w));
+    win.connect_realize(set_passthrough);
+    win.connect_map(set_passthrough);
     win.set_visible(true);
     win
 }

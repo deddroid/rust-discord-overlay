@@ -11,8 +11,10 @@ use tracing::{info, warn};
 pub async fn run(_state: SharedState, tx: EventTx) {
     info!("Audio assist started (PulseAudio/PipeWire)");
 
+    // LC_ALL=C: pactl translates its output, and we match on the English text
     let mut child = match Command::new("pactl")
         .args(["subscribe"])
+        .env("LC_ALL", "C")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -29,14 +31,12 @@ pub async fn run(_state: SharedState, tx: EventTx) {
     let mut last_deaf: Option<bool> = None;
 
     while let Ok(Some(line)) = lines.next_line().await {
-        // Only care about source/sink changes
-        if !line.contains("source") && !line.contains("sink") {
+        if !is_device_change(&line) {
             continue;
         }
 
         // Read current state immediately (no debounce — last_* checks prevent duplicates)
-        let mute = get_source_muted().await;
-        let deaf  = get_sink_muted().await;
+        let (mute, deaf) = tokio::join!(get_source_muted(), get_sink_muted());
 
         // Deafen check first
         if deaf != last_deaf {
@@ -65,6 +65,14 @@ pub async fn run(_state: SharedState, tx: EventTx) {
     let _ = child.wait().await;
 }
 
+/// Only `change` events on a sink/source device, or on the server (default device
+/// switched), can alter mute state. `sink-input`/`source-output` events fire
+/// constantly while apps play audio and would spawn two pactl processes each.
+fn is_device_change(line: &str) -> bool {
+    let Some(target) = line.strip_prefix("Event 'change' on ") else { return false };
+    target.starts_with("sink #") || target.starts_with("source #") || target.starts_with("server")
+}
+
 async fn get_source_muted() -> Option<bool> {
     pactl_get_mute("get-source-mute", "@DEFAULT_SOURCE@").await
 }
@@ -76,6 +84,7 @@ async fn get_sink_muted() -> Option<bool> {
 async fn pactl_get_mute(cmd: &str, device: &str) -> Option<bool> {
     let out = Command::new("pactl")
         .args([cmd, device])
+        .env("LC_ALL", "C")
         .output().await.ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     if s.contains("yes") { Some(true) }

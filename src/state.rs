@@ -1,5 +1,5 @@
 use crate::config::Config;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -15,9 +15,17 @@ pub struct VoiceUser {
     pub deafened: bool,
     /// When they last spoke (for fade-out timer)
     pub last_spoke: Option<Instant>,
-    /// Cached rendered avatar pixels (RGBA)
-    pub avatar_cache: Option<Vec<u8>>,
-    pub avatar_size: (u32, u32),
+    /// Decoded avatar, shared so cloning a user never copies pixels
+    pub avatar_cache: Option<Arc<Avatar>>,
+}
+
+/// Avatar pixels already in cairo's premultiplied ARGB32 layout
+#[derive(Debug)]
+pub struct Avatar {
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
 }
 
 impl VoiceUser {
@@ -31,14 +39,12 @@ impl VoiceUser {
             deafened: false,
             last_spoke: None,
             avatar_cache: None,
-            avatar_size: (0, 0),
         }
     }
 }
 
 /// A Discord text message
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 #[allow(dead_code)]
 pub struct TextMessage {
     pub author: String,
@@ -49,19 +55,20 @@ pub struct TextMessage {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-#[allow(dead_code)]
 pub struct Inner {
     pub config: Config,
     pub voice_users: HashMap<String, VoiceUser>,
     pub channel_name: Option<String>,
     pub guild_name: Option<String>,
-    pub text_messages: Vec<TextMessage>,
+    pub text_messages: VecDeque<TextMessage>,
     /// Overlay visibility toggle
     pub visible: bool,
     /// Connected to Discord RPC?
     pub connected: bool,
     /// Our own user id (so we can highlight ourselves)
     pub self_user_id: Option<String>,
+    /// User ids whose avatar download is in flight (avoids duplicate fetches)
+    pub avatar_pending: HashSet<String>,
 }
 
 impl Inner {
@@ -71,10 +78,11 @@ impl Inner {
             voice_users: HashMap::new(),
             channel_name: None,
             guild_name: None,
-            text_messages: Vec::new(),
+            text_messages: VecDeque::new(),
             visible: true,
             connected: false,
             self_user_id: None,
+            avatar_pending: HashSet::new(),
         }
     }
 }
@@ -85,6 +93,7 @@ pub type SharedState = Arc<Mutex<Inner>>;
 pub struct AppState;
 
 impl AppState {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(config: Config) -> SharedState {
         Arc::new(Mutex::new(Inner::new(config)))
     }

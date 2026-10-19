@@ -2,15 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::warn;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum Anchor { TopLeft, TopRight, BottomLeft, BottomRight }
-impl Default for Anchor { fn default() -> Self { Self::BottomLeft } }
+pub enum Anchor { TopLeft, TopRight, #[default] BottomLeft, BottomRight }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum AvatarOrder { Alphabetical, Id, LastSpoken }
-impl Default for AvatarOrder { fn default() -> Self { Self::LastSpoken } }
+pub enum AvatarOrder { Alphabetical, Id, #[default] LastSpoken }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
