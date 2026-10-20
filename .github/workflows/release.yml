@@ -4,6 +4,19 @@ on:
   push:
     tags:
       - 'v*'
+  # Rebuild the release for an existing tag without moving it
+  # (moving a tag would change the AUR source checksum)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release, e.g. v0.2.0'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -18,13 +31,15 @@ jobs:
           pacman -S --noconfirm git rust cargo gtk4 gtk4-layer-shell libadwaita cairo pkg-config base-devel
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Build
         run: cargo build --release
 
       - name: Package binary
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${TAG#v}
           mkdir -p dist
           cp target/release/rust-discord-overlay dist/
           cp assets/icon.svg dist/
@@ -35,6 +50,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           files: dist/rust-discord-overlay-*-x86_64.tar.gz
           generate_release_notes: true
         env:
