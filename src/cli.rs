@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "rusto-discord-overlay", version)]
+#[command(name = "rust-discord-overlay", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
