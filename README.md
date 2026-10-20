@@ -140,4 +140,6 @@ rust-discord-overlay (daemon)
 
 ## License
 
-GPL-3.0 — same as the original Discover project.
+[GPL-3.0-or-later](LICENSE) — same family as the original Discover project.
+You are free to use, modify and redistribute this software; modified versions
+you distribute must stay under the GPL.
