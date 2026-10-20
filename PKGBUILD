@@ -21,7 +21,7 @@ depends=(
 makedepends=('cargo' 'librsvg')
 optdepends=('libpulse: sync system mic/speaker mute with Discord (pactl)')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('5aac1835cc98cacd316b38aa916bb9b649f26d9ec53254347df4f31975f8b0c5')
 
 prepare() {
     cd "$pkgname-$pkgver"

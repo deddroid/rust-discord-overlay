@@ -28,16 +28,18 @@ This is a rewrite of [trigg/Discover](https://github.com/trigg/Discover) — all
 
 ### Arch Linux / CachyOS / Manjaro (recommended)
 
+Available on the AUR as [`rust-discord-overlay`](https://aur.archlinux.org/packages/rust-discord-overlay):
+
 ```bash
-# Clone and build with makepkg
-git clone https://github.com/deddroid/rust-discord-overlay.git
-cd rust-discord-overlay
-makepkg -si
+yay -S rust-discord-overlay   # or: paru -S rust-discord-overlay
 ```
 
-Or manually with the PKGBUILD included in the repo — once published on AUR you will be able to install with:
+Without an AUR helper:
+
 ```bash
-yay -S rust-discord-overlay
+git clone https://aur.archlinux.org/rust-discord-overlay.git
+cd rust-discord-overlay
+makepkg -si
 ```
 
 ### Other distributions
