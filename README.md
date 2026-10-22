@@ -31,7 +31,8 @@ This is a rewrite of [trigg/Discover](https://github.com/trigg/Discover) — all
 Available on the AUR as [`rust-discord-overlay`](https://aur.archlinux.org/packages/rust-discord-overlay):
 
 ```bash
-yay -S rust-discord-overlay   # or: paru -S rust-discord-overlay
+yay -S rust-discord-overlay       # builds from source
+yay -S rust-discord-overlay-bin   # prebuilt binary from the GitHub release, no Rust toolchain needed
 ```
 
 Without an AUR helper:
