@@ -236,8 +236,15 @@ async fn handle_event(
         ("DISPATCH", "VOICE_CHANNEL_SELECT") => {
             if let Some(old) = current_voice.take() {
                 unsub_voice(ws, &old).await;
-                state.lock().unwrap().voice_users.clear();
             }
+            // Always drop the old channel's users (we may not have known it, e.g.
+            // after a reconnect) and tell the overlay, or it keeps drawing them
+            {
+                let mut s = state.lock().unwrap();
+                s.voice_users.clear();
+                s.channel_name = None;
+            }
+            let _ = tx.send(RpcEvent::VoiceStateRemove(String::new()));
             if let Some(ch_id) = data["channel_id"].as_str() {
                 sub_voice(ws, ch_id).await;
                 *current_voice = Some(ch_id.to_string());
