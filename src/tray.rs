@@ -1,9 +1,16 @@
-use tracing::info;
+use ksni::TrayMethods;
+use std::time::Duration;
+use tracing::{info, warn};
+
+/// First retry delay when the tray can't be registered; doubles up to MAX
+const RETRY_MIN: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 struct RdoTray;
 
 impl ksni::Tray for RdoTray {
+    fn id(&self) -> String { "rust-discord-overlay".into() }
     fn icon_name(&self) -> String { "rust-discord-overlay".into() }
     fn title(&self) -> String { "Rust Discord Overlay".into() }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -63,11 +70,27 @@ fn send_ipc(cmd: crate::cli::Command) {
     });
 }
 
-pub fn spawn() {
+/// Registers the tray icon, retrying until the desktop's StatusNotifierWatcher
+/// answers. At login the overlay can start before Plasma's tray is ready
+/// (D-Bus NoReply); that must never take the overlay down.
+pub async fn run() {
     info!("Starting system tray");
-    std::thread::spawn(|| {
-        let service = ksni::TrayService::new(RdoTray);
-        service.spawn();
-        loop { std::thread::sleep(std::time::Duration::from_secs(60)); }
-    });
+    let mut delay = RETRY_MIN;
+    loop {
+        // assume_sni_available: if the watcher isn't there yet, wait for it
+        // to come online instead of failing
+        match RdoTray.assume_sni_available(true).spawn().await {
+            Ok(handle) => {
+                info!("System tray ready");
+                // Keep the handle alive for the whole process lifetime
+                std::future::pending::<()>().await;
+                drop(handle);
+            }
+            Err(e) => {
+                warn!("System tray not available yet ({e}), retrying in {}s", delay.as_secs());
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(RETRY_MAX);
+            }
+        }
+    }
 }

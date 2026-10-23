@@ -93,7 +93,7 @@ async fn run(state: state::SharedState, audio_assist: bool) -> Result<()> {
         tokio::spawn(audio::run(state.clone(), tx.clone()));
     }
 
-    tray::spawn();
+    tokio::spawn(tray::run());
     overlay::run(state, rx, tx).await;
 
     ipc::remove_pid();
